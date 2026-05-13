@@ -1012,10 +1012,10 @@ def build_momentum_cooling_alert(coin) -> str:
     kdj_val = f"{t.h4_kdj_j:.1f}" if t is not None else "N/A"
 
     return "\n".join([
-        f"⏳ COOLING DOWN: <b>{coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        f"4H KDJ overheated ({kdj_val}) — wait for cooldown.",
-        "Watch for entry when 4H KDJ drops below 80.",
-        f"Fundamentals: ✅ MCap {_vol_human(coin.market_cap)} | Circ {coin.circ_supply_pct:.0f}%",
+        f"⏳ <b>{coin.symbol}</b> {coin.change_1h:+.2f}% — Cooling down",
+        f"4H KDJ: {kdj_val} (wait for &lt;80)",
+        f"Fundamentals: MCap {_vol_human(coin.market_cap)} | Circ {coin.circ_supply_pct:.0f}%",
+        "Watch for entry when 4H cools.",
     ])
 
 

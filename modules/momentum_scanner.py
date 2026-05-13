@@ -205,8 +205,9 @@ def _mark_alerted(symbol: str) -> None:
         del _alerted[k]
 
 
-# Last Stage-1 candidate count — read by main.py for stats tracking
-_last_m1m7_count: int = 0
+# Stage-1 and Stage-2 counters — read by main.py for stats tracking
+_last_m1m7_count:    int = 0
+_last_macro_blocked: int = 0   # coins rejected at 4H macro gate per scan
 
 # Separate cooldown for cooling alerts so they never block entry alerts
 _cooling_alerted: dict[str, float] = {}
@@ -453,8 +454,10 @@ def scan() -> list[MomentumResult]:
         mcap       = q.get("market_cap")         or 0.0
         vol_24h    = q.get("volume_24h")         or 0.0
 
+        if change_1h < cfg.MOMENTUM_EARLY_EXIT_PCT:
+            break   # CMC sorted desc — no more Zone 2 coins below this
         if change_1h < cfg.MOMENTUM_1H_CHANGE_MIN_PCT:
-            break   # sorted desc — everything below is also too low
+            continue   # 2.5–3.0% buffer zone: below M1 minimum, keep scanning
         if change_1h > cfg.MOMENTUM_1H_CHANGE_MAX_PCT:
             continue
 
@@ -492,13 +495,14 @@ def scan() -> list[MomentumResult]:
             price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct,
         ))
 
-    global _last_m1m7_count
+    global _last_m1m7_count, _last_macro_blocked
     _last_m1m7_count = len(candidates)
     log.info(f"Stage 1: {len(candidates)} passed M1–M7.")
 
     # ── Stages 2 + 3: TA gate + full scoring ─────────────────────────────────
-    scored:         list[MomentumResult] = []
-    cooling_alerts: list[MomentumResult] = []
+    scored:              list[MomentumResult] = []
+    cooling_alerts:      list[MomentumResult] = []
+    macro_blocked_count: int = 0
 
     # Pre-compute fixed trade-level constants (same for every coin)
     _sl_factor  = 1.0 - cfg.MOMENTUM_SL_PCT  / 100.0
@@ -520,6 +524,7 @@ def scan() -> list[MomentumResult]:
             continue
 
         if not tech.macro_ok:
+            macro_blocked_count += 1
             reasons = []
             if not tech.h4_ema_ok:
                 reasons.append(
@@ -527,7 +532,7 @@ def scan() -> list[MomentumResult]:
                     f"or {tech.h4_ema12:.4g} < {tech.h4_ema20:.4g})"
                 )
             if not tech.h4_kdj_ok:
-                reasons.append(f"4H KDJ J {tech.h4_kdj_j:.1f} ≥ 90")
+                reasons.append(f"4H KDJ J {tech.h4_kdj_j:.1f} ≥ {cfg.MOMENTUM_TA_H4_KDJ_J_MAX:.0f}")
             log.info(f"  MACRO ✗  {symbol}: {', '.join(reasons)}")
 
             # Cooling alert: trend is bullish (EMA stack OK) but KDJ is overheated
@@ -629,11 +634,14 @@ def scan() -> list[MomentumResult]:
         _mark_alerted(r.symbol)
         new_alerts.append(r)
 
+    _last_macro_blocked = macro_blocked_count
+
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
     cooling = len(cooling_alerts)
     log.info(
         f"Scan done — {len(candidates)} M1–M7, "
+        f"{macro_blocked_count} macro-blocked, "
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
         f"{strong} STRONG ENTRY + {watch} WATCH + {cooling} COOLING alerts."
     )
@@ -667,7 +675,7 @@ def tech_summary_lines(result: MomentumResult) -> list[str]:
         f"{t.h4_ema6:.5g} {'>' if t.h4_ema6 > t.h4_ema12 else '<'} "
         f"{t.h4_ema12:.5g} {'>' if t.h4_ema12 > t.h4_ema20 else '<'} "
         f"{t.h4_ema20:.5g}",
-        f"  {ck(t.h4_kdj_ok)}  KDJ J     (4H)    {t.h4_kdj_j:.1f}  [<90]",
+        f"  {ck(t.h4_kdj_ok)}  KDJ J     (4H)    {t.h4_kdj_j:.1f}  [<{cfg.MOMENTUM_TA_H4_KDJ_J_MAX:.0f}]",
         "",
         "  ── 15m Scoring ──────────────────────────────────────────────────",
         f"  {ck(t.m15_ema_ok)}  EMA6 > EMA20      "

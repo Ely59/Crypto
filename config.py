@@ -139,8 +139,9 @@ LOG_FILE  = "logs/crypto_ecosystem.log"
 MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com"  # Futures/perp API (no key needed)
 
 # 1h momentum gate
-MOMENTUM_1H_CHANGE_MIN_PCT   = 3.0    # minimum 1h gain % to qualify
+MOMENTUM_1H_CHANGE_MIN_PCT   = 3.0    # minimum 1h gain % to qualify (M1 filter)
 MOMENTUM_1H_CHANGE_MAX_PCT   = 12.0   # maximum 1h gain % (avoid parabolic pumps)
+MOMENTUM_EARLY_EXIT_PCT      = 2.5    # break CMC loop below this — no more Zone 2 coins
 
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M minimum market cap
@@ -164,7 +165,7 @@ MOMENTUM_ALERT_COOLDOWN_MIN  = 120    # minutes before the same coin can re-aler
 # Layer 1: 4H Macro Filter (binary — BOTH must pass or coin is rejected immediately)
 #   • EMA6 > EMA12 > EMA20 on 4H   (bearish trend = instant reject)
 #   • KDJ J < 90 on 4H             (overheated on higher TF = instant reject)
-MOMENTUM_TA_H4_KDJ_J_MAX  = 90.0   # 4H KDJ J ceiling
+MOMENTUM_TA_H4_KDJ_J_MAX  = 95.0   # 4H KDJ J ceiling
 #
 # Layer 2: 15m Scoring (50 pts max)
 #   EMA6 > EMA20      → 15 pts

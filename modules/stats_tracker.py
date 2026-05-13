@@ -9,10 +9,24 @@ from __future__ import annotations
 import copy
 import threading
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 _BERLIN = ZoneInfo("Europe/Berlin")
+_UTC    = timezone.utc
+
+# Scan schedule: :02/:17/:32/:47 each hour UTC
+_SCAN_MINUTES = [2, 17, 32, 47]
+
+
+def _minutes_to_next_scan() -> int:
+    """Return whole minutes until the next scheduled momentum scan."""
+    now  = datetime.now(tz=_UTC)
+    mins = now.minute
+    for m in _SCAN_MINUTES:
+        if m > mins:
+            return m - mins
+    return 60 - mins + _SCAN_MINUTES[0]
 
 
 @dataclass
@@ -20,6 +34,7 @@ class DailyStats:
     date:           date       = field(default_factory=date.today)
     scan_count:     int        = 0
     coins_analyzed: int        = 0   # cumulative M1-M7 passes across all scans
+    macro_blocked:  int        = 0   # cumulative 4H macro gate rejections
     entry_alerts:   int        = 0   # STRONG ENTRY alerts sent
     watch_alerts:   int        = 0   # WATCH alerts sent
     cooling_alerts: int        = 0   # COOLING_DOWN (4H KDJ overheated) alerts sent
@@ -27,6 +42,7 @@ class DailyStats:
     best_score:     int        = 0
     last_scan_ts:   str        = ""  # HH:MM Berlin time of most recent scan
     last_results:   list[str]  = field(default_factory=list)
+    top_coins:      list       = field(default_factory=list)  # [(symbol, score, emoji), ...]
 
 
 class StatsTracker:
@@ -49,11 +65,12 @@ class StatsTracker:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def record_scan(self, results: list, m1m7_count: int) -> None:
+    def record_scan(self, results: list, m1m7_count: int, macro_blocked: int = 0) -> None:
         """
         Call after every successful m5.scan().
-        results     — list[MomentumResult] returned by scan()
-        m1m7_count  — number of Stage-1 candidates (from m5._last_m1m7_count)
+        results       — list[MomentumResult] returned by scan()
+        m1m7_count    — Stage-1 candidates (from m5._last_m1m7_count)
+        macro_blocked — coins blocked at 4H macro gate (from m5._last_macro_blocked)
         """
         now_str = datetime.now(tz=_BERLIN).strftime("%H:%M")
         with self._lock:
@@ -61,6 +78,7 @@ class StatsTracker:
             s = self._stats
             s.scan_count     += 1
             s.coins_analyzed += m1m7_count
+            s.macro_blocked  += macro_blocked
             s.last_scan_ts    = now_str
 
             snapshot: list[str] = []
@@ -78,11 +96,18 @@ class StatsTracker:
                     s.best_score = r.total_score
                     s.best_coin  = r.symbol
 
+                # Update top-3 leaderboard (non-COOLING only)
+                if rec not in ("COOLING_DOWN",):
+                    entry = (r.symbol, r.total_score, r.rec_emoji)
+                    s.top_coins.append(entry)
+                    s.top_coins.sort(key=lambda x: x[1], reverse=True)
+                    s.top_coins = s.top_coins[:3]
+
                 # Build last-results snapshot for /status
                 if rec == "COOLING_DOWN":
                     kdj = f"{r.tech.h4_kdj_j:.1f}" if r.tech else "?"
                     snapshot.append(
-                        f"⏳ {r.symbol} {r.change_1h:+.2f}% — KDJ overheated ({kdj})"
+                        f"⏳ {r.symbol} {r.change_1h:+.2f}% — KDJ {kdj} (cooling)"
                     )
                 else:
                     snapshot.append(
@@ -109,20 +134,31 @@ class StatsTracker:
             self._ensure_today()
             s = self._stats
 
+            next_min = _minutes_to_next_scan()
+
             if not s.scan_count:
-                return "No scans completed today yet."
+                return (
+                    "No scans completed today yet.\n"
+                    f"Next scan in <b>{next_min} min</b>."
+                )
 
             total_alerts = s.entry_alerts + s.watch_alerts
             lines = [
-                f"Last scan: <b>{s.last_scan_ts}</b> Berlin",
+                f"Last scan: <b>{s.last_scan_ts}</b> Berlin  |  Next in <b>{next_min} min</b>",
                 f"Scans today: <b>{s.scan_count}</b>",
-                f"Coins analyzed (M1–M7): <b>{s.coins_analyzed}</b>",
+                "",
+                f"M1–M7 passed: <b>{s.coins_analyzed}</b>  |  4H blocked: <b>{s.macro_blocked}</b>",
                 f"Alerts sent: <b>{total_alerts}</b>"
-                f"  (Entry: {s.entry_alerts} | Watch: {s.watch_alerts})",
-                f"Cooling (overheated): <b>{s.cooling_alerts}</b>",
+                f"  (Entry: {s.entry_alerts} | Watch: {s.watch_alerts} | Cooling: {s.cooling_alerts})",
             ]
+
+            if s.top_coins:
+                lines += ["", "🏆 Top coins today:"]
+                for i, (sym, score, emoji) in enumerate(s.top_coins, 1):
+                    lines.append(f"  {i}. {emoji} <b>{sym}</b> — {score}/100")
+
             if s.best_coin:
-                lines.append(f"Best score: <b>{s.best_coin} {s.best_score}/100</b>")
+                lines.append(f"\nBest score: <b>{s.best_coin} {s.best_score}/100</b>")
 
             if s.last_results:
                 lines += ["", "Last scan:"]
