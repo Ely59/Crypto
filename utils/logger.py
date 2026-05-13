@@ -5,6 +5,7 @@ Import with:  from utils.logger import get_logger
 """
 
 import logging
+import os
 import colorlog
 from config import LOG_LEVEL, LOG_FILE
 
@@ -32,11 +33,15 @@ def get_logger(name: str) -> logging.Logger:
     ))
 
     # ── File handler (plain text) ─────────────────────────────────────────
-    file_handler = logging.FileHandler(LOG_FILE)
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    ))
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        file_handler = logging.FileHandler(LOG_FILE)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
+        logger.addHandler(file_handler)
+    except Exception:
+        pass  # console-only logging if file system is unavailable
 
     logger.addHandler(console)
-    logger.addHandler(file_handler)
     return logger
