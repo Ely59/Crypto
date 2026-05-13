@@ -133,6 +133,12 @@ class TechResult:
     vol_ok:     bool
     vol_pts:    int         # 10 or 0
 
+    # 4H EMA separation (for logging / EARLY gate)
+    h4_ema_sep: float       # (ema6 - ema20) / ema20
+
+    # Last 15m candle % change (used for EARLY SIGNAL detection)
+    m15_change: float
+
     # Technical score (0-60)
     score: int
 
@@ -185,6 +191,7 @@ class MomentumResult:
     reward_tp1_usd: float = 0.0        # POSITION_USD × TP1_PCT/100
     reward_tp2_usd: float = 0.0        # POSITION_USD × TP2_PCT/100
     rr_str:         str   = "1:1.67"   # reward_tp1 / risk
+    sl_pct:         float = 6.0        # actual SL % applied (4.0 for EARLY SIGNAL)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -289,7 +296,9 @@ def _check_technicals(mexc_symbol: str) -> TechResult | None:
     h4_ema6  = float(compute_ema(close_4h,  6).iloc[-1])
     h4_ema12 = float(compute_ema(close_4h, 12).iloc[-1])
     h4_ema20 = float(compute_ema(close_4h, 20).iloc[-1])
-    h4_ema_ok = h4_ema6 > h4_ema12 > h4_ema20
+    h4_ema_sep = (h4_ema6 - h4_ema20) / h4_ema20 if h4_ema20 > 0 else 0.0
+    h4_ema_ok  = (h4_ema6 > h4_ema12 > h4_ema20 and
+                  h4_ema_sep >= cfg.MOMENTUM_TA_H4_EMA_SEP_MIN)
 
     _, _, j4h = compute_kdj(df_4h)
     h4_kdj_j  = float(j4h.iloc[-1])
@@ -317,14 +326,14 @@ def _check_technicals(mexc_symbol: str) -> TechResult | None:
     m15_price_pts = _PTS_PRICE if m15_price_ok else 0
 
     m15_rsi6     = float(compute_rsi(close_15m, period=6).iloc[-1])
-    m15_rsi6_ok  = cfg.MOMENTUM_TA_15M_RSI6_MIN <= m15_rsi6 <= cfg.MOMENTUM_TA_15M_RSI6_MAX
-    m15_rsi6_hot = m15_rsi6 > cfg.MOMENTUM_TA_15M_RSI6_MAX
+    m15_rsi6_ok  = cfg.MOMENTUM_TA_15M_RSI6_MIN <= m15_rsi6 <= cfg.MOMENTUM_RSI_MAX
+    m15_rsi6_hot = m15_rsi6 > cfg.MOMENTUM_RSI_MAX
     m15_rsi6_pts = _PTS_RSI6 if m15_rsi6_ok else 0
 
     _, _, j15   = compute_kdj(df_15m)
     m15_kdj_j   = float(j15.iloc[-1])
-    m15_kdj_ok  = m15_kdj_j < cfg.MOMENTUM_TA_15M_KDJ_J_MAX
-    m15_kdj_hot = m15_kdj_j >= cfg.MOMENTUM_TA_15M_KDJ_J_MAX
+    m15_kdj_ok  = m15_kdj_j < cfg.MOMENTUM_KDJ_MAX
+    m15_kdj_hot = m15_kdj_j >= cfg.MOMENTUM_KDJ_MAX
     m15_kdj_pts = _PTS_KDJ if m15_kdj_ok else 0
 
     dif_s, dea_s, _ = compute_macd(close_15m)
@@ -336,9 +345,13 @@ def _check_technicals(mexc_symbol: str) -> TechResult | None:
     score = (m15_ema_pts + m15_price_pts + m15_rsi6_pts +
              m15_kdj_pts + m15_macd_pts + vol_pts)
 
+    # Last 15m candle % change — used for EARLY SIGNAL detection in scan()
+    m15_change = ((float(close_15m.iloc[-1]) - float(close_15m.iloc[-2])) /
+                   float(close_15m.iloc[-2]) * 100.0) if len(close_15m) >= 2 else 0.0
+
     return TechResult(
         h4_ema6=round(h4_ema6, 8),    h4_ema12=round(h4_ema12, 8),  h4_ema20=round(h4_ema20, 8),
-        h4_ema_ok=h4_ema_ok,
+        h4_ema_ok=h4_ema_ok,          h4_ema_sep=round(h4_ema_sep * 100, 3),
         h4_kdj_j=round(h4_kdj_j, 2),  h4_kdj_ok=h4_kdj_ok,
         macro_ok=macro_ok,
         m15_ema6=round(m15_ema6, 8),   m15_ema20=round(m15_ema20, 8),
@@ -351,6 +364,7 @@ def _check_technicals(mexc_symbol: str) -> TechResult | None:
         m15_macd_dif=round(m15_macd_dif, 8), m15_macd_dea=round(m15_macd_dea, 8),
         m15_macd_ok=m15_macd_ok,        m15_macd_pts=m15_macd_pts,
         vol_pct=round(vol_pct, 1),     vol_ok=vol_ok,  vol_pts=vol_pts,
+        m15_change=round(m15_change, 2),
         score=score,
     )
 
@@ -448,22 +462,26 @@ def scan() -> list[MomentumResult]:
         tags   = [t.lower() for t in (coin.get("tags") or [])]
         q      = coin.get("quote", {}).get("USD", {})
 
-        change_1h  = q.get("percent_change_1h")  or 0.0
-        change_24h = q.get("percent_change_24h") or 0.0
-        price      = q.get("price")              or 0.0
-        mcap       = q.get("market_cap")         or 0.0
-        vol_24h    = q.get("volume_24h")         or 0.0
+        change_1h      = q.get("percent_change_1h")  or 0.0
+        change_24h     = q.get("percent_change_24h") or 0.0
+        vol_change_24h = q.get("volume_change_24h")  or 0.0
+        price          = q.get("price")              or 0.0
+        mcap           = q.get("market_cap")         or 0.0
+        vol_24h        = q.get("volume_24h")         or 0.0
 
         if change_1h < cfg.MOMENTUM_EARLY_EXIT_PCT:
             break   # CMC sorted desc — no more Zone 2 coins below this
-        if change_1h < cfg.MOMENTUM_1H_CHANGE_MIN_PCT:
-            continue   # 2.5–3.0% buffer zone: below M1 minimum, keep scanning
-        if change_1h > cfg.MOMENTUM_1H_CHANGE_MAX_PCT:
+        if change_1h < cfg.MOMENTUM_ZONE_MIN:
+            continue   # 1.5–2.0% buffer zone: below M1 minimum, keep scanning
+        if change_1h > cfg.MOMENTUM_ZONE_MAX:
             continue
 
         if not (cfg.MOMENTUM_MCAP_MIN_USD <= mcap <= cfg.MOMENTUM_MCAP_MAX_USD):
             continue
+        # M3: dual volume condition — absolute floor + 24h spike check
         if vol_24h < cfg.MOMENTUM_VOL_24H_MIN_USD:
+            continue
+        if vol_change_24h < (cfg.MOMENTUM_VOL_SPIKE_MIN - 1.0) * 100:
             continue
 
         circ_pct = _resolve_circ_pct(coin)
@@ -474,7 +492,7 @@ def scan() -> list[MomentumResult]:
         if fdv <= 0 or mcap <= 0:
             continue
         fdv_ratio = fdv / mcap
-        if fdv_ratio > cfg.MOMENTUM_FDV_MCAP_MAX_RATIO:
+        if fdv_ratio > cfg.MOMENTUM_FDV_RATIO_MAX:
             continue
 
         matched_tags = [t for t in tags if t in cfg.MOMENTUM_ALLOWED_TAGS]
@@ -572,18 +590,42 @@ def scan() -> list[MomentumResult]:
         elif total >= cfg.MOMENTUM_TOTAL_WATCH:
             recommendation = "WATCH"
             rec_emoji      = "🟡"
-        elif total >= cfg.MOMENTUM_TOTAL_MONITOR:
-            log.info(f"  MONITOR  {symbol}: {total}/100 — logged only, no alert")
-            continue
         else:
-            log.debug(f"  SKIP     {symbol}: {total}/100 < {cfg.MOMENTUM_TOTAL_MONITOR}")
-            continue
+            # Promote MONITOR-level coins that show early-move characteristics
+            is_early = (
+                total >= cfg.MOMENTUM_TOTAL_MONITOR and
+                change_1h < cfg.MOMENTUM_EARLY_1H_MAX and
+                cfg.MOMENTUM_EARLY_15M_MIN <= tech.m15_change <= cfg.MOMENTUM_EARLY_15M_MAX and
+                tech.vol_pct >= cfg.MOMENTUM_VOL_SPIKE_MIN * 100
+            )
+            if is_early:
+                recommendation = "EARLY SIGNAL"
+                rec_emoji      = "🔍"
+            elif total >= cfg.MOMENTUM_TOTAL_MONITOR:
+                log.info(f"  MONITOR  {symbol}: {total}/100 — logged only, no alert")
+                continue
+            else:
+                log.debug(f"  SKIP     {symbol}: {total}/100 < {cfg.MOMENTUM_TOTAL_MONITOR}")
+                continue
+
+        # SL parameters — tighter for EARLY SIGNAL (−4% vs standard −6%)
+        if recommendation == "EARLY SIGNAL":
+            coin_sl_factor = 1.0 - cfg.MOMENTUM_EARLY_SL_PCT / 100.0
+            coin_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_EARLY_SL_PCT / 100.0, 2)
+            coin_rr_str    = f"1:{_rwd_tp1 / coin_risk_usd:.2f}"
+            coin_sl_pct    = cfg.MOMENTUM_EARLY_SL_PCT
+        else:
+            coin_sl_factor = _sl_factor
+            coin_risk_usd  = _risk_usd
+            coin_rr_str    = _rr_str
+            coin_sl_pct    = cfg.MOMENTUM_SL_PCT
 
         # Risk warnings
         warnings = _generate_warnings(tech, change_1h, circ_pct, fdv_ratio)
 
+        early_note = f"  [15m {tech.m15_change:+.1f}%]" if recommendation == "EARLY SIGNAL" else ""
         log.info(
-            f"  {rec_emoji} {recommendation}  {symbol}  {total}/100  "
+            f"  {rec_emoji} {recommendation}  {symbol}  {total}/100{early_note}  "
             f"[tech {tech.score}+fund {fund.total}]  "
             f"[ema {tech.m15_ema_pts}+px {tech.m15_price_pts}+"
             f"rsi {tech.m15_rsi6_pts}+kdj {tech.m15_kdj_pts}+"
@@ -610,13 +652,14 @@ def scan() -> list[MomentumResult]:
             rec_emoji       = rec_emoji,
             warnings        = warnings,
             entry_price     = round(price, 8),
-            stop_loss       = round(price * _sl_factor, 8),
+            stop_loss       = round(price * coin_sl_factor, 8),
             tp1             = round(price * _tp1_factor, 8),
             tp2             = round(price * _tp2_factor, 8),
-            risk_usd        = _risk_usd,
+            risk_usd        = coin_risk_usd,
             reward_tp1_usd  = _rwd_tp1,
             reward_tp2_usd  = _rwd_tp2,
-            rr_str          = _rr_str,
+            rr_str          = coin_rr_str,
+            sl_pct          = coin_sl_pct,
         ))
 
     # Sort best-first
@@ -685,7 +728,7 @@ def tech_summary_lines(result: MomentumResult) -> list[str]:
         f"  {ck(t.m15_rsi6_ok)}  RSI6              "
         f"{t.m15_rsi6:.1f}  [40–72]{rsi_flag}   +{t.m15_rsi6_pts} pts",
         f"  {ck(t.m15_kdj_ok)}  KDJ J             "
-        f"{t.m15_kdj_j:.1f}  [<75]{kdj_flag}   +{t.m15_kdj_pts} pts",
+        f"{t.m15_kdj_j:.1f}  [<{cfg.MOMENTUM_KDJ_MAX:.0f}]{kdj_flag}   +{t.m15_kdj_pts} pts",
         f"  {ck(t.m15_macd_ok)}  MACD DIF > DEA    "
         f"DIF {t.m15_macd_dif:.5g}  DEA {t.m15_macd_dea:.5g}   +{t.m15_macd_pts} pts",
         "",

@@ -37,6 +37,7 @@ class DailyStats:
     macro_blocked:  int        = 0   # cumulative 4H macro gate rejections
     entry_alerts:   int        = 0   # STRONG ENTRY alerts sent
     watch_alerts:   int        = 0   # WATCH alerts sent
+    early_alerts:   int        = 0   # EARLY SIGNAL alerts sent
     cooling_alerts: int        = 0   # COOLING_DOWN (4H KDJ overheated) alerts sent
     best_coin:      str        = ""
     best_score:     int        = 0
@@ -88,16 +89,18 @@ class StatsTracker:
                     s.entry_alerts += 1
                 elif rec == "WATCH":
                     s.watch_alerts += 1
+                elif rec == "EARLY SIGNAL":
+                    s.early_alerts += 1
                 elif rec == "COOLING_DOWN":
                     s.cooling_alerts += 1
 
                 # Track best total score (ignore COOLING which has score 0)
-                if rec not in ("COOLING_DOWN",) and r.total_score > s.best_score:
+                if rec not in ("COOLING_DOWN", "EARLY SIGNAL") and r.total_score > s.best_score:
                     s.best_score = r.total_score
                     s.best_coin  = r.symbol
 
                 # Update top-3 leaderboard (non-COOLING only)
-                if rec not in ("COOLING_DOWN",):
+                if rec not in ("COOLING_DOWN", "EARLY SIGNAL"):
                     entry = (r.symbol, r.total_score, r.rec_emoji)
                     s.top_coins.append(entry)
                     s.top_coins.sort(key=lambda x: x[1], reverse=True)
@@ -142,14 +145,14 @@ class StatsTracker:
                     f"Next scan in <b>{next_min} min</b>."
                 )
 
-            total_alerts = s.entry_alerts + s.watch_alerts
+            total_alerts = s.entry_alerts + s.watch_alerts + s.early_alerts
             lines = [
                 f"Last scan: <b>{s.last_scan_ts}</b> Berlin  |  Next in <b>{next_min} min</b>",
                 f"Scans today: <b>{s.scan_count}</b>",
                 "",
                 f"M1–M7 passed: <b>{s.coins_analyzed}</b>  |  4H blocked: <b>{s.macro_blocked}</b>",
                 f"Alerts sent: <b>{total_alerts}</b>"
-                f"  (Entry: {s.entry_alerts} | Watch: {s.watch_alerts} | Cooling: {s.cooling_alerts})",
+                f"  (Entry: {s.entry_alerts} | Watch: {s.watch_alerts} | Early: {s.early_alerts} | Cooling: {s.cooling_alerts})",
             ]
 
             if s.top_coins:

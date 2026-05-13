@@ -139,18 +139,19 @@ LOG_FILE  = "logs/crypto_ecosystem.log"
 MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com"  # Futures/perp API (no key needed)
 
 # 1h momentum gate
-MOMENTUM_1H_CHANGE_MIN_PCT   = 3.0    # minimum 1h gain % to qualify (M1 filter)
-MOMENTUM_1H_CHANGE_MAX_PCT   = 12.0   # maximum 1h gain % (avoid parabolic pumps)
-MOMENTUM_EARLY_EXIT_PCT      = 2.5    # break CMC loop below this — no more Zone 2 coins
+MOMENTUM_ZONE_MIN            = 2.0    # minimum 1h gain % to qualify — M1 filter  (was 3.0)
+MOMENTUM_ZONE_MAX            = 10.0   # maximum 1h gain % — avoid parabolic pumps  (was 12.0)
+MOMENTUM_EARLY_EXIT_PCT      = 1.5    # CMC loop break below this — below Zone 2 floor (was 2.5)
 
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M minimum market cap
 MOMENTUM_MCAP_MAX_USD        = 5_000_000_000   # $5B maximum market cap
-MOMENTUM_VOL_24H_MIN_USD     = 10_000_000      # $10M minimum 24h volume
+MOMENTUM_VOL_24H_MIN_USD     = 5_000_000       # $5M minimum 24h volume  (was $10M)
+MOMENTUM_VOL_SPIKE_MIN       = 1.30            # vol_change_24h must be ≥ this ratio (130% of prior 24h)
 
 # Supply / dilution filters
 MOMENTUM_CIRC_SUPPLY_MIN_PCT = 40.0   # circulating / max_supply >= 40 %
-MOMENTUM_FDV_MCAP_MAX_RATIO  = 4.0    # FDV / market_cap <= 4
+MOMENTUM_FDV_RATIO_MAX       = 3.0    # FDV / market_cap ≤ 3×  (was 4×; renamed from MOMENTUM_FDV_MCAP_MAX_RATIO)
 
 # CMC fetch settings
 # Credit cost: 1 credit per 200 results  →  500 results = 3 credits per call
@@ -174,8 +175,9 @@ MOMENTUM_TA_H4_KDJ_J_MAX  = 95.0   # 4H KDJ J ceiling
 #   KDJ J < 75        → 10 pts   (above 75 = overbought warning)
 #   MACD DIF > DEA    →  5 pts
 MOMENTUM_TA_15M_RSI6_MIN  = 40.0   # RSI6 lower bound
-MOMENTUM_TA_15M_RSI6_MAX  = 72.0   # RSI6 upper bound (above = hot, risk flag)
-MOMENTUM_TA_15M_KDJ_J_MAX = 75.0   # KDJ J upper bound (above = overbought warning)
+MOMENTUM_RSI_MAX          = 72.0   # RSI6 upper bound — above = risk flag  (renamed from MOMENTUM_TA_15M_RSI6_MAX)
+MOMENTUM_KDJ_MAX          = 72.0   # KDJ J upper bound — above = overbought  (was 75; renamed from MOMENTUM_TA_15M_KDJ_J_MAX)
+MOMENTUM_TA_H4_EMA_SEP_MIN = 0.002 # EMA6 must be ≥ 0.2% above EMA20 on 4H (min separation)
 #
 # Volume check (4H): 10 pts
 MOMENTUM_TA_VOL_RATIO_MIN = 1.20   # current 4H candle vol must exceed 120% of MA10
@@ -202,6 +204,10 @@ MOMENTUM_TOTAL_MONITOR         = 50    # 🟠 MONITOR — silent (logged only, n
 #                                         SKIP — total < 50  (debug log only)
 #
 # ─── Fixed-% risk framework (replaces EMA20-based SL) ────────────────────────
+MOMENTUM_EARLY_SL_PCT          = 4.0    # SL for EARLY SIGNAL — tighter than normal
+MOMENTUM_EARLY_15M_MIN         = 1.0    # min 15m candle gain % to qualify as early mover
+MOMENTUM_EARLY_15M_MAX         = 3.5    # max 15m candle gain % (above = too extended)
+MOMENTUM_EARLY_1H_MAX          = 5.0    # 1H must still be below this for EARLY classification
 MOMENTUM_SL_PCT                = 6.0    # SL  = entry × (1 − 6%)
 MOMENTUM_TP1_PCT               = 10.0   # TP1 = entry × (1 + 10%)
 MOMENTUM_TP2_PCT               = 20.0   # TP2 = entry × (1 + 20%)
@@ -241,4 +247,9 @@ MOMENTUM_ALLOWED_TAGS = frozenset({
     "gamefi",
     "play-to-earn",
     "metaverse",
+    # DeFi & DEX
+    "decentralized-exchange",
+    "defi",
+    # Modular
+    "modular-blockchain",
 })

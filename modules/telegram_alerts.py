@@ -945,6 +945,8 @@ def build_momentum_alert(coin) -> str:
     lines = [
         f"{coin.rec_emoji} <b>{coin.symbol}</b> {coin.change_1h:+.2f}% (1H) — <b>{coin.recommendation}</b>",
     ]
+    if coin.recommendation == "EARLY SIGNAL":
+        lines.append("<i>Move just starting — tighter SL advised</i>")
 
     if t is not None:
         lines += [
@@ -972,7 +974,7 @@ def build_momentum_alert(coin) -> str:
         "",
         f"Entry: <b>{_usd(coin.entry_price)}</b>",
         "",
-        f"SL: <b>{_usd(coin.stop_loss)}</b> (-{cfg.MOMENTUM_SL_PCT:.0f}%) → Risk: -${coin.risk_usd:.0f}",
+        f"SL: <b>{_usd(coin.stop_loss)}</b> (-{coin.sl_pct:.0f}%) → Risk: -${coin.risk_usd:.0f}",
         "",
         f"TP1: <b>{_usd(coin.tp1)}</b> (+{cfg.MOMENTUM_TP1_PCT:.0f}%) → Reward: +${coin.reward_tp1_usd:.0f}",
         "",
