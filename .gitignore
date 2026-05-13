@@ -1,0 +1,32 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Logs & runtime data
+logs/
+data/
+*.log
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code session files
+.claude/

@@ -1,0 +1,23 @@
+# ─── Core Data & HTTP ────────────────────────────────────────────────────────
+requests==2.31.0          # HTTP calls to CoinGecko, Binance, Alternative.me
+pandas==2.2.2             # DataFrame manipulation for OHLCV data
+numpy==1.26.4             # Numerical calculations (RSI, ATR, etc.)
+
+# ─── Technical Analysis ──────────────────────────────────────────────────────
+ta==0.11.0                # Pure-Python TA library: RSI, MACD, Bollinger Bands, ATR
+
+# ─── Telegram Bot ────────────────────────────────────────────────────────────
+python-telegram-bot==21.3 # Async Telegram bot for alerts and daily briefings
+
+# ─── Scheduling ──────────────────────────────────────────────────────────────
+apscheduler==3.10.4       # Schedule daily 8am briefing (cron trigger)
+
+# ─── Async HTTP (optional speedup for concurrent API calls) ──────────────────
+aiohttp==3.9.5            # Async HTTP client for parallel coin scanning
+
+# ─── Logging & Environment ───────────────────────────────────────────────────
+python-dotenv==1.0.1      # Load secrets from .env file (API keys, chat IDs)
+colorlog==6.8.2           # Colorized console logs for easier debugging
+
+# ─── Timezone ────────────────────────────────────────────────────────────────
+tzdata==2024.1            # Required on Railway (Linux) — zoneinfo needs the tz database
