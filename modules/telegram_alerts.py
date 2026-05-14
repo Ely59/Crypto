@@ -1034,24 +1034,18 @@ def build_golden_cross_alert(coin) -> str:
     Early-entry alert for a fresh 15m EMA6/EMA20 golden cross.
     Lower vol and 1H threshold than main pipeline — signal may be very fresh.
     """
-    t = coin.tech
-    rsi_str = f"{t.m15_rsi6:.1f}" if t is not None else "N/A"
-    vol_str = f"{t.vol_pct:.0f}%" if t is not None else "N/A"
     mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
 
     return "\n".join([
-        f"⚡ <b>GOLDEN CROSS: {coin.symbol}</b>  {coin.change_1h:+.2f}% (1H)",
-        "<i>15m EMA just crossed bullish — very early signal</i>",
+        f"⚡ <b>GOLDEN CROSS: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
+        "EMA6 just crossed above EMA20 on 15m.",
+        "Very early signal — move just starting.",
         "",
-        f"📊 RSI: <b>{rsi_str}</b>  |  Vol: <b>{vol_str} of MA10</b>",
-        f"💰 Price: <b>{_usd(coin.entry_price)}</b>",
+        f"Entry: <b>{_usd(coin.entry_price)}</b>",
+        f"SL: -5% = <b>{_usd(coin.stop_loss)}</b>",
+        f"TP1: +10% = <b>{_usd(coin.tp1)}</b>  |  TP2: +20% = <b>{_usd(coin.tp2)}</b>",
         "",
-        f"🛑 SL: <b>{_usd(coin.stop_loss)}</b> (-{coin.sl_pct:.0f}%) → Risk: -${coin.risk_usd:.0f}",
-        f"🎯 TP1: <b>{_usd(coin.tp1)}</b> (+{cfg.MOMENTUM_TP1_PCT:.0f}%) → +${coin.reward_tp1_usd:.0f}",
-        f"🚀 TP2: <b>{_usd(coin.tp2)}</b> (+{cfg.MOMENTUM_TP2_PCT:.0f}%) → +${coin.reward_tp2_usd:.0f}",
-        f"R/R: {coin.rr_str}",
-        "",
-        "⚠️ <i>Confirm with chart before entry</i>",
+        "⚠️ <i>Early signal: verify chart before entry</i>",
         f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
     ])
 

@@ -206,7 +206,7 @@ MOMENTUM_TOTAL_MONITOR         = 50    # 🟠 MONITOR — silent (logged only, n
 #
 # ─── Fixed-% risk framework (replaces EMA20-based SL) ────────────────────────
 MOMENTUM_EARLY_SL_PCT          = 4.0    # SL for EARLY SIGNAL — tighter than normal
-MOMENTUM_EARLY_15M_MIN         = 1.0    # min 15m candle gain % to qualify as early mover
+MOMENTUM_EARLY_15M_MIN         = 0.8    # min 15m candle gain % to qualify as early mover (was 1.0)
 MOMENTUM_EARLY_15M_MAX         = 3.5    # max 15m candle gain % (above = too extended)
 MOMENTUM_EARLY_1H_MAX          = 5.0    # 1H must still be below this for EARLY classification
 MOMENTUM_SL_PCT                = 6.0    # SL  = entry × (1 − 6%)
@@ -230,15 +230,17 @@ MOMENTUM_TA_4H_LIMIT      = 100    # 4H candles (covers EMA20 + KDJ + MACD warm-
 MOMENTUM_TA_15M_LIMIT     = 60     # 15m candles (≈ 15 hours of data)
 
 # ─── Golden Cross signal ──────────────────────────────────────────────────────
-MOMENTUM_GC_1H_MIN  = 0.5    # minimum 1H gain for GC candidates
-MOMENTUM_GC_1H_MAX  = 6.0    # maximum 1H gain for GC candidates
-MOMENTUM_GC_RSI_MAX = 60.0   # 15m RSI must be below this for GC signal
-MOMENTUM_GC_SL_PCT  = 5.0    # stop-loss % for GOLDEN CROSS alerts
+MOMENTUM_GC_1H_MIN      = 0.5    # minimum 1H gain for GC candidates
+MOMENTUM_GC_1H_MAX      = 5.0    # maximum 1H gain (was 6.0)
+MOMENTUM_GC_RSI_MAX     = 65.0   # 15m RSI ceiling for GC (was 60.0)
+MOMENTUM_GC_SL_PCT      = 5.0    # stop-loss % for GOLDEN CROSS alerts
+MOMENTUM_GC_EARLY_1H_MIN = 0.8   # boundary: below = pure GC vol, above = early-detection vol (was 1.0)
 
-# Dynamic 4H volume thresholds (vs 4H MA10)
-MOMENTUM_VOL_FAST_MIN = 1.30   # fast move (1H > 5%): vol > 130% MA10
-MOMENTUM_VOL_SLOW_MIN = 0.80   # slow trend (1H 2-5%): vol > 80% MA10
-MOMENTUM_VOL_GC_MIN   = 0.70   # golden cross: vol > 70% MA10
+# Dynamic 4H volume thresholds (vs 4H MA10) — graduated by signal speed
+MOMENTUM_VOL_FAST_MIN  = 1.30   # fast move (1H > 5%): vol > 130% MA10
+MOMENTUM_VOL_SLOW_MIN  = 0.55   # slow trend (1H 2-5%): vol > 55% MA10 (was 80%)
+MOMENTUM_VOL_EARLY_MIN = 0.45   # early detection (1H 0.8-5%): vol > 45% MA10
+MOMENTUM_VOL_GC_MIN    = 0.40   # pure GC zone (1H 0.5-0.8%): vol > 40% MA10 (was 70%)
 
 # CMC tag slugs for allowed categories (used for set membership check)
 MOMENTUM_ALLOWED_TAGS = frozenset({

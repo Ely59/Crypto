@@ -746,7 +746,10 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  GC COOLDOWN: {symbol}")
             continue
 
-        tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
+        # Graduated vol threshold: 0.5-0.8% uses GC floor, 0.8-5% uses early-detection floor
+        gc_vol_threshold = (cfg.MOMENTUM_VOL_GC_MIN if change_1h < cfg.MOMENTUM_GC_EARLY_1H_MIN
+                            else cfg.MOMENTUM_VOL_EARLY_MIN)
+        tech = _check_technicals(mexc_symbol, gc_vol_threshold)
         if tech is None:
             continue
 
@@ -759,7 +762,7 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  GC skip {symbol}: RSI {tech.m15_rsi6:.1f} >= {cfg.MOMENTUM_GC_RSI_MAX}")
             continue
         if not tech.vol_ok:
-            log.debug(f"  GC skip {symbol}: vol {tech.vol_pct:.0f}% < {cfg.MOMENTUM_VOL_GC_MIN*100:.0f}%")
+            log.debug(f"  GC skip {symbol}: vol {tech.vol_pct:.0f}% < {gc_vol_threshold*100:.0f}%")
             continue
 
         log.info(
