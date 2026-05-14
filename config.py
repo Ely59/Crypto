@@ -141,7 +141,7 @@ MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com"  # Futures/perp API (no key
 # 1h momentum gate
 MOMENTUM_ZONE_MIN            = 2.0    # minimum 1h gain % to qualify — M1 filter  (was 3.0)
 MOMENTUM_ZONE_MAX            = 10.0   # maximum 1h gain % — avoid parabolic pumps  (was 12.0)
-MOMENTUM_EARLY_EXIT_PCT      = 1.5    # CMC loop break below this — below Zone 2 floor (was 2.5)
+MOMENTUM_EARLY_EXIT_PCT      = 0.5    # CMC loop break — below GC minimum (was 1.5)
 
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M minimum market cap
@@ -166,7 +166,8 @@ MOMENTUM_ALERT_COOLDOWN_MIN  = 120    # minutes before the same coin can re-aler
 # Layer 1: 4H Macro Filter (binary — BOTH must pass or coin is rejected immediately)
 #   • EMA6 > EMA12 > EMA20 on 4H   (bearish trend = instant reject)
 #   • KDJ J < 90 on 4H             (overheated on higher TF = instant reject)
-MOMENTUM_TA_H4_KDJ_J_MAX  = 95.0   # 4H KDJ J ceiling
+MOMENTUM_TA_H4_KDJ_J_MAX  = 95.0   # 4H KDJ J ceiling (fast move ≥5%)
+MOMENTUM_SLOW_RSI_MAX     = 65.0   # slow-trend (1H <5%): 15m RSI ceiling when KDJ 95-100 is allowed
 #
 # Layer 2: 15m Scoring (50 pts max)
 #   EMA6 > EMA20      → 15 pts
@@ -227,6 +228,17 @@ MOMENTUM_WARN_FDV_HIGH_RATIO   = 3.0    # FDV/MCap above this  → "High dilutio
 # Kline fetch limits
 MOMENTUM_TA_4H_LIMIT      = 100    # 4H candles (covers EMA20 + KDJ + MACD warm-up)
 MOMENTUM_TA_15M_LIMIT     = 60     # 15m candles (≈ 15 hours of data)
+
+# ─── Golden Cross signal ──────────────────────────────────────────────────────
+MOMENTUM_GC_1H_MIN  = 0.5    # minimum 1H gain for GC candidates
+MOMENTUM_GC_1H_MAX  = 6.0    # maximum 1H gain for GC candidates
+MOMENTUM_GC_RSI_MAX = 60.0   # 15m RSI must be below this for GC signal
+MOMENTUM_GC_SL_PCT  = 5.0    # stop-loss % for GOLDEN CROSS alerts
+
+# Dynamic 4H volume thresholds (vs 4H MA10)
+MOMENTUM_VOL_FAST_MIN = 1.30   # fast move (1H > 5%): vol > 130% MA10
+MOMENTUM_VOL_SLOW_MIN = 0.80   # slow trend (1H 2-5%): vol > 80% MA10
+MOMENTUM_VOL_GC_MIN   = 0.70   # golden cross: vol > 70% MA10
 
 # CMC tag slugs for allowed categories (used for set membership check)
 MOMENTUM_ALLOWED_TAGS = frozenset({

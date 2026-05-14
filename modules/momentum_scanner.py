@@ -139,6 +139,9 @@ class TechResult:
     # Last 15m candle % change (used for EARLY SIGNAL detection)
     m15_change: float
 
+    # True if EMA6 just crossed above EMA20 on 15m within the last 2 candles
+    m15_golden_cross: bool
+
     # Technical score (0-60)
     score: int
 
@@ -231,6 +234,20 @@ def _mark_cooling_alerted(symbol: str) -> None:
         del _cooling_alerted[k]
 
 
+_gc_alerted: dict[str, float] = {}
+
+
+def _on_gc_cooldown(symbol: str) -> bool:
+    return (time.time() - _gc_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+
+
+def _mark_gc_alerted(symbol: str) -> None:
+    _gc_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in _gc_alerted.items() if ts < stale]:
+        del _gc_alerted[k]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage 1 helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -275,7 +292,7 @@ def _best_category_label(tags: list[str]) -> str:
 # Stage 2 + 3a: Technical Analysis
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _check_technicals(mexc_symbol: str) -> TechResult | None:
+def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_VOL_RATIO_MIN) -> TechResult | None:
     """
     Fetch MEXC futures klines and evaluate the two-layer TA gate.
     Returns None only when kline data is genuinely unavailable.
@@ -310,16 +327,25 @@ def _check_technicals(mexc_symbol: str) -> TechResult | None:
     vol_last = float(df_4h["volume"].iloc[-1])
     vol_ma10 = float(df_4h["volume"].rolling(10).mean().iloc[-1])
     vol_pct  = (vol_last / vol_ma10 * 100.0) if vol_ma10 > 0 else 0.0
-    vol_ok   = vol_pct >= cfg.MOMENTUM_TA_VOL_RATIO_MIN * 100
+    vol_ok   = vol_pct >= vol_threshold * 100
     vol_pts  = _PTS_VOL if vol_ok else 0
 
     # ── 15m Scoring ──────────────────────────────────────────────────────────
     close_15m = df_15m["close"]
 
-    m15_ema6  = float(compute_ema(close_15m,  6).iloc[-1])
-    m15_ema20 = float(compute_ema(close_15m, 20).iloc[-1])
+    ema6_15m  = compute_ema(close_15m,  6)
+    ema20_15m = compute_ema(close_15m, 20)
+    m15_ema6  = float(ema6_15m.iloc[-1])
+    m15_ema20 = float(ema20_15m.iloc[-1])
     m15_ema_ok  = m15_ema6 > m15_ema20
     m15_ema_pts = _PTS_EMA if m15_ema_ok else 0
+
+    # Golden cross: EMA6 was below EMA20 two candles ago, now above (fresh cross)
+    m15_golden_cross = (
+        len(ema6_15m) >= 3 and
+        float(ema6_15m.iloc[-3]) < float(ema20_15m.iloc[-3]) and
+        m15_ema6 > m15_ema20
+    )
 
     m15_price     = float(close_15m.iloc[-1])
     m15_price_ok  = m15_price > m15_ema20
@@ -365,6 +391,7 @@ def _check_technicals(mexc_symbol: str) -> TechResult | None:
         m15_macd_ok=m15_macd_ok,        m15_macd_pts=m15_macd_pts,
         vol_pct=round(vol_pct, 1),     vol_ok=vol_ok,  vol_pts=vol_pts,
         m15_change=round(m15_change, 2),
+        m15_golden_cross=m15_golden_cross,
         score=score,
     )
 
@@ -454,7 +481,8 @@ def scan() -> list[MomentumResult]:
     )
 
     # ── Stage 1: M1–M7 ───────────────────────────────────────────────────────
-    candidates = []
+    candidates    = []   # 2-10% 1H gain — main scoring pipeline
+    gc_candidates = []   # 0.5-6% 1H gain — Golden Cross pipeline
 
     for coin in coins:
         symbol = coin.get("symbol", "").upper()
@@ -470,11 +498,9 @@ def scan() -> list[MomentumResult]:
         vol_24h        = q.get("volume_24h")         or 0.0
 
         if change_1h < cfg.MOMENTUM_EARLY_EXIT_PCT:
-            break   # CMC sorted desc — no more Zone 2 coins below this
-        if change_1h < cfg.MOMENTUM_ZONE_MIN:
-            continue   # 1.5–2.0% buffer zone: below M1 minimum, keep scanning
+            break   # CMC sorted desc — no more candidates below GC minimum
         if change_1h > cfg.MOMENTUM_ZONE_MAX:
-            continue
+            continue   # parabolic — skip both pipelines
 
         if not (cfg.MOMENTUM_MCAP_MIN_USD <= mcap <= cfg.MOMENTUM_MCAP_MAX_USD):
             continue
@@ -503,19 +529,29 @@ def scan() -> list[MomentumResult]:
         if mexc_symbol not in futures_set:
             continue
 
-        log.info(
-            f"  M1–M7 ✓  {symbol:<10}  1h {change_1h:+.2f}%  "
-            f"MCap ${mcap/1e6:.0f}M  Vol ${vol_24h/1e6:.0f}M  "
-            f"FDV/MC {fdv_ratio:.1f}×  [{matched_tags[0]}]"
-        )
-        candidates.append((
+        # Pipeline assignment: main (2-10%), GC (0.5-6%), or both (2-6%)
+        in_main = change_1h >= cfg.MOMENTUM_ZONE_MIN   # >= 2.0%
+        in_gc   = change_1h <= cfg.MOMENTUM_GC_1H_MAX  # <= 6.0%
+
+        entry_tuple = (
             symbol, name, matched_tags, mexc_symbol,
             price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct,
-        ))
+        )
+        if in_main:
+            log.info(
+                f"  M1–M7 ✓  {symbol:<10}  1h {change_1h:+.2f}%  "
+                f"MCap ${mcap/1e6:.0f}M  Vol ${vol_24h/1e6:.0f}M  "
+                f"FDV/MC {fdv_ratio:.1f}×  [{matched_tags[0]}]"
+            )
+            candidates.append(entry_tuple)
+        if in_gc:
+            if not in_main:
+                log.info(f"  GC cand  {symbol:<10}  1h {change_1h:+.2f}%  [{matched_tags[0]}]")
+            gc_candidates.append(entry_tuple)
 
     global _last_m1m7_count, _last_macro_blocked
     _last_m1m7_count = len(candidates)
-    log.info(f"Stage 1: {len(candidates)} passed M1–M7.")
+    log.info(f"Stage 1: {len(candidates)} passed M1–M7, {len(gc_candidates)} GC candidates.")
 
     # ── Stages 2 + 3: TA gate + full scoring ─────────────────────────────────
     scored:              list[MomentumResult] = []
@@ -535,13 +571,29 @@ def scan() -> list[MomentumResult]:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
-        tech = _check_technicals(mexc_symbol)
+        # Dynamic vol threshold: fast move (>5%) vs slow trend (2-5%)
+        vol_threshold = (cfg.MOMENTUM_VOL_FAST_MIN if change_1h > cfg.MOMENTUM_EARLY_1H_MAX
+                         else cfg.MOMENTUM_VOL_SLOW_MIN)
+
+        tech = _check_technicals(mexc_symbol, vol_threshold)
 
         if tech is None:
             log.warning(f"  TA skip  {symbol}: futures kline data unavailable")
             continue
 
-        if not tech.macro_ok:
+        # Dynamic 4H KDJ: slow-trend coins (1H <5%) may pass with KDJ up to 100
+        # provided 15m RSI is below MOMENTUM_SLOW_RSI_MAX (65) — slower trends are
+        # naturally hotter on 4H KDJ without meaning the move is overextended
+        if not tech.macro_ok and tech.h4_ema_ok and not tech.h4_kdj_ok:
+            effective_macro_ok = (
+                change_1h < cfg.MOMENTUM_EARLY_1H_MAX and
+                tech.h4_kdj_j < 100 and
+                tech.m15_rsi6 < cfg.MOMENTUM_SLOW_RSI_MAX
+            )
+        else:
+            effective_macro_ok = tech.macro_ok
+
+        if not effective_macro_ok:
             macro_blocked_count += 1
             reasons = []
             if not tech.h4_ema_ok:
@@ -554,6 +606,7 @@ def scan() -> list[MomentumResult]:
             log.info(f"  MACRO ✗  {symbol}: {', '.join(reasons)}")
 
             # Cooling alert: trend is bullish (EMA stack OK) but KDJ is overheated
+            # and the dynamic slow-trend exception didn't promote this coin
             if tech.h4_ema_ok and not tech.h4_kdj_ok:
                 if not _on_cooling_cooldown(symbol):
                     log.info(f"  ⏳ COOLING  {symbol}: KDJ J {tech.h4_kdj_j:.1f} — queuing alert")
@@ -575,7 +628,7 @@ def scan() -> list[MomentumResult]:
                         rec_emoji       = "⏳",
                     ))
                     _mark_cooling_alerted(symbol)
-            continue
+            continue  # macro gate failed
 
         # Fundamental bonus
         fund = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
@@ -679,16 +732,85 @@ def scan() -> list[MomentumResult]:
 
     _last_macro_blocked = macro_blocked_count
 
+    # ── Stage 2b: Golden Cross pipeline ──────────────────────────────────────
+    gc_alerts: list[MomentumResult] = []
+    alerted_this_scan = {r.symbol for r in new_alerts}
+
+    for entry in gc_candidates:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
+
+        if symbol in alerted_this_scan:
+            continue  # main pipeline already alerted this coin this scan
+        if _on_gc_cooldown(symbol):
+            log.debug(f"  GC COOLDOWN: {symbol}")
+            continue
+
+        tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
+        if tech is None:
+            continue
+
+        if not tech.m15_golden_cross:
+            continue
+        if not tech.h4_ema_ok:
+            log.debug(f"  GC skip {symbol}: 4H EMA bearish")
+            continue
+        if tech.m15_rsi6 >= cfg.MOMENTUM_GC_RSI_MAX:
+            log.debug(f"  GC skip {symbol}: RSI {tech.m15_rsi6:.1f} >= {cfg.MOMENTUM_GC_RSI_MAX}")
+            continue
+        if not tech.vol_ok:
+            log.debug(f"  GC skip {symbol}: vol {tech.vol_pct:.0f}% < {cfg.MOMENTUM_VOL_GC_MIN*100:.0f}%")
+            continue
+
+        log.info(
+            f"  ⚡ GOLDEN CROSS  {symbol}  1h {change_1h:+.2f}%  "
+            f"RSI {tech.m15_rsi6:.1f}  Vol {tech.vol_pct:.0f}%"
+        )
+        _mark_gc_alerted(symbol)
+
+        gc_sl_factor = 1.0 - cfg.MOMENTUM_GC_SL_PCT / 100.0
+        gc_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_GC_SL_PCT / 100.0, 2)
+        gc_rr_str    = f"1:{_rwd_tp1 / gc_risk_usd:.2f}"
+
+        gc_alerts.append(MomentumResult(
+            symbol          = symbol,
+            name            = name,
+            price           = round(price, 8),
+            change_1h       = round(change_1h, 2),
+            change_24h      = round(change_24h, 2),
+            market_cap      = mcap,
+            volume_24h      = vol_24h,
+            fdv             = fdv,
+            fdv_mcap_ratio  = round(fdv_ratio, 2),
+            circ_supply_pct = round(circ_pct, 1),
+            matched_tags    = matched_tags,
+            mexc_symbol     = mexc_symbol,
+            tech            = tech,
+            recommendation  = "GOLDEN CROSS",
+            rec_emoji       = "⚡",
+            entry_price     = round(price, 8),
+            stop_loss       = round(price * gc_sl_factor, 8),
+            tp1             = round(price * _tp1_factor, 8),
+            tp2             = round(price * _tp2_factor, 8),
+            risk_usd        = gc_risk_usd,
+            reward_tp1_usd  = _rwd_tp1,
+            reward_tp2_usd  = _rwd_tp2,
+            rr_str          = gc_rr_str,
+            sl_pct          = cfg.MOMENTUM_GC_SL_PCT,
+        ))
+
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
+    early   = sum(r.recommendation == "EARLY SIGNAL" for r in new_alerts)
+    gc      = len(gc_alerts)
     cooling = len(cooling_alerts)
     log.info(
         f"Scan done — {len(candidates)} M1–M7, "
         f"{macro_blocked_count} macro-blocked, "
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
-        f"{strong} STRONG ENTRY + {watch} WATCH + {cooling} COOLING alerts."
+        f"{strong} STRONG + {watch} WATCH + {early} EARLY + {gc} GC + {cooling} COOLING alerts."
     )
-    return new_alerts + cooling_alerts
+    return new_alerts + cooling_alerts + gc_alerts
 
 
 # ══════════════════════════════════════════════════════════════════════════════

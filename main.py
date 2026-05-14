@@ -224,6 +224,8 @@ def run_momentum_scan():
     for coin in results:
         if coin.recommendation == "COOLING_DOWN":
             m4.send_momentum_cooling_alert(coin)
+        elif coin.recommendation == "GOLDEN CROSS":
+            m4.send_golden_cross_alert(coin)
         else:
             m4.send_momentum_alert(coin)
         sent += 1

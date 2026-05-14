@@ -1029,6 +1029,39 @@ def send_momentum_cooling_alert(coin) -> bool:
     return send_message(build_momentum_cooling_alert(coin))
 
 
+def build_golden_cross_alert(coin) -> str:
+    """
+    Early-entry alert for a fresh 15m EMA6/EMA20 golden cross.
+    Lower vol and 1H threshold than main pipeline — signal may be very fresh.
+    """
+    t = coin.tech
+    rsi_str = f"{t.m15_rsi6:.1f}" if t is not None else "N/A"
+    vol_str = f"{t.vol_pct:.0f}%" if t is not None else "N/A"
+    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+
+    return "\n".join([
+        f"⚡ <b>GOLDEN CROSS: {coin.symbol}</b>  {coin.change_1h:+.2f}% (1H)",
+        "<i>15m EMA just crossed bullish — very early signal</i>",
+        "",
+        f"📊 RSI: <b>{rsi_str}</b>  |  Vol: <b>{vol_str} of MA10</b>",
+        f"💰 Price: <b>{_usd(coin.entry_price)}</b>",
+        "",
+        f"🛑 SL: <b>{_usd(coin.stop_loss)}</b> (-{coin.sl_pct:.0f}%) → Risk: -${coin.risk_usd:.0f}",
+        f"🎯 TP1: <b>{_usd(coin.tp1)}</b> (+{cfg.MOMENTUM_TP1_PCT:.0f}%) → +${coin.reward_tp1_usd:.0f}",
+        f"🚀 TP2: <b>{_usd(coin.tp2)}</b> (+{cfg.MOMENTUM_TP2_PCT:.0f}%) → +${coin.reward_tp2_usd:.0f}",
+        f"R/R: {coin.rr_str}",
+        "",
+        "⚠️ <i>Confirm with chart before entry</i>",
+        f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
+    ])
+
+
+def send_golden_cross_alert(coin) -> bool:
+    """Send a Module 5 Golden Cross early-entry alert to Telegram."""
+    log.info(f"Sending GOLDEN CROSS alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
+    return send_message(build_golden_cross_alert(coin))
+
+
 # ── Startup message ────────────────────────────────────────────────────────────
 
 def build_startup_message() -> str:
@@ -1037,8 +1070,8 @@ def build_startup_message() -> str:
         "🤖 <b>Crypto Scout Pro — ONLINE ✅</b>",
         "",
         "Interval: every 15 min",
-        "Filters: Zone 2 (3-12%) | $25M+ MCap | MEXC Perp",
-        "Categories: L1, L2, AI, DePIN, RWA, Gaming",
+        "Signals: Zone (2-10%) | ⚡ Golden Cross (0.5-6%) | $25M+ MCap | MEXC Perp",
+        "Categories: L1, L2, AI, DePIN, RWA, Gaming, DeFi",
         "",
         "Type /status for last scan results",
     ])
@@ -1057,7 +1090,7 @@ def build_m5_daily_summary(stats) -> str:
     stats is a DailyStats from modules.stats_tracker.
     """
     date_str     = stats.date.strftime("%d %B %Y")
-    total_alerts = stats.entry_alerts + stats.watch_alerts
+    total_alerts = stats.entry_alerts + stats.watch_alerts + stats.early_alerts + stats.gc_alerts
     best_line    = (
         f"Best score: <b>{stats.best_coin} {stats.best_score}/100</b>"
         if stats.best_coin else "Best score: —"
@@ -1069,7 +1102,8 @@ def build_m5_daily_summary(stats) -> str:
         f"Scans today: <b>{stats.scan_count}</b>",
         f"Coins analyzed: <b>{stats.coins_analyzed}</b>",
         f"Alerts sent: <b>{total_alerts}</b>"
-        f"  (Entry: {stats.entry_alerts} | Watchlist: {stats.watch_alerts})",
+        f"  (Entry: {stats.entry_alerts} | Watch: {stats.watch_alerts}"
+        f" | Early: {stats.early_alerts} | GC: {stats.gc_alerts})",
         best_line,
         f"Missed (4H overheated): <b>{stats.cooling_alerts}</b> coins",
     ])
