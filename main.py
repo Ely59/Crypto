@@ -296,7 +296,8 @@ async def _command_poll_async() -> None:
                         )
                     log.info("/status replied.")
                 elif text.startswith("/test"):
-                    m4.send_test_alert()
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, m4.send_test_alert)
                     log.info("/test replied.")
         except Exception as exc:
             log.warning(f"Command poll error (will retry): {exc}")
