@@ -232,15 +232,16 @@ MOMENTUM_TA_15M_LIMIT     = 60     # 15m candles (≈ 15 hours of data)
 # ─── Golden Cross signal ──────────────────────────────────────────────────────
 MOMENTUM_GC_1H_MIN      = 0.5    # minimum 1H gain for GC candidates
 MOMENTUM_GC_1H_MAX      = 5.0    # maximum 1H gain (was 6.0)
-MOMENTUM_GC_RSI_MAX     = 65.0   # 15m RSI ceiling for GC (was 60.0)
+MOMENTUM_GC_RSI_MAX     = 72.0   # 15m RSI ceiling for GC (was 65.0 — 72 still below overbought)
 MOMENTUM_GC_SL_PCT      = 5.0    # stop-loss % for GOLDEN CROSS alerts
 MOMENTUM_GC_EARLY_1H_MIN = 0.8   # boundary: below = pure GC vol, above = early-detection vol (was 1.0)
 
 # Dynamic 4H volume thresholds (vs 4H MA10) — graduated by signal speed
 MOMENTUM_VOL_FAST_MIN  = 1.30   # fast move (1H > 5%): vol > 130% MA10
 MOMENTUM_VOL_SLOW_MIN  = 0.55   # slow trend (1H 2-5%): vol > 55% MA10 (was 80%)
-MOMENTUM_VOL_EARLY_MIN = 0.45   # early detection (1H 0.8-5%): vol > 45% MA10
-MOMENTUM_VOL_GC_MIN    = 0.40   # pure GC zone (1H 0.5-0.8%): vol > 40% MA10 (was 70%)
+MOMENTUM_VOL_EARLY_MIN = 0.30   # early detection (1H 0.8-5%): vol > 30% MA10 (was 0.45)
+MOMENTUM_VOL_GC_MIN    = 0.30   # pure GC zone (1H 0.5-0.8%): vol > 30% MA10 (was 0.40)
+MOMENTUM_VOL_GC_WARN   = 0.40   # below this at cross → "low volume" warning in Telegram
 
 # CMC tag slugs for allowed categories (used for set membership check)
 MOMENTUM_ALLOWED_TAGS = frozenset({

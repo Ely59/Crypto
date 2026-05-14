@@ -1035,8 +1035,9 @@ def build_golden_cross_alert(coin) -> str:
     Lower vol and 1H threshold than main pipeline — signal may be very fresh.
     """
     mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    t = coin.tech
 
-    return "\n".join([
+    lines = [
         f"⚡ <b>GOLDEN CROSS: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         "EMA6 just crossed above EMA20 on 15m.",
         "Very early signal — move just starting.",
@@ -1046,8 +1047,13 @@ def build_golden_cross_alert(coin) -> str:
         f"TP1: +10% = <b>{_usd(coin.tp1)}</b>  |  TP2: +20% = <b>{_usd(coin.tp2)}</b>",
         "",
         "⚠️ <i>Early signal: verify chart before entry</i>",
-        f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
-    ])
+    ]
+
+    if t is not None and t.vol_pct < cfg.MOMENTUM_VOL_GC_WARN * 100:
+        lines.append("⚠️ <i>Low volume at cross — confirm with price action before entry</i>")
+
+    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
+    return "\n".join(lines)
 
 
 def send_golden_cross_alert(coin) -> bool:
