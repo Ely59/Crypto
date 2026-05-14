@@ -295,6 +295,9 @@ async def _command_poll_async() -> None:
                             parse_mode = ParseMode.HTML,
                         )
                     log.info("/status replied.")
+                elif text.startswith("/test"):
+                    m4.send_test_alert()
+                    log.info("/test replied.")
         except Exception as exc:
             log.warning(f"Command poll error (will retry): {exc}")
             await asyncio.sleep(10)
@@ -399,6 +402,7 @@ def start_scheduler():
 
     # Announce that the bot is online
     m4.send_startup_message()
+    m4.send_startup_ping()
 
     try:
         scheduler.start()

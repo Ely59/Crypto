@@ -1021,6 +1021,85 @@ def build_momentum_cooling_alert(coin) -> str:
     ])
 
 
+def _make_test_momentum_result():
+    """
+    Synthetic MomentumResult for /test delivery checks.
+    Passes through build_momentum_alert() so the format is byte-for-byte identical
+    to a real alert — if it looks right, real alerts will too.
+    """
+    from modules.momentum_scanner import MomentumResult, TechResult, FundResult
+
+    tech = TechResult(
+        h4_ema6=0.5124,    h4_ema12=0.5089,   h4_ema20=0.5052,
+        h4_ema_ok=True,    h4_ema_sep=1.42,
+        h4_kdj_j=72.3,     h4_kdj_ok=True,
+        macro_ok=True,
+        m15_ema6=0.5138,   m15_ema20=0.5101,
+        m15_ema_ok=True,   m15_ema_pts=15,
+        m15_price=0.5145,  m15_price_ok=True,  m15_price_pts=10,
+        m15_rsi6=58.4,     m15_rsi6_ok=True,   m15_rsi6_hot=False, m15_rsi6_pts=10,
+        m15_kdj_j=61.2,    m15_kdj_ok=True,    m15_kdj_hot=False,  m15_kdj_pts=10,
+        m15_macd_dif=0.00031, m15_macd_dea=0.00018,
+        m15_macd_ok=True,  m15_macd_pts=5,
+        vol_pct=187.0,     vol_ok=True,        vol_pts=10,
+        m15_change=1.8,    m15_golden_cross=False,
+        score=60,
+    )
+    fund = FundResult(mcap_pts=15, circ_pts=10, fdv_pts=10, gain_pts=5, total=40)
+
+    return MomentumResult(
+        symbol          = "TEST",
+        name            = "Test Coin (delivery check)",
+        price           = 0.5145,
+        change_1h       = 6.83,
+        change_24h      = 12.40,
+        market_cap      = 250_000_000,
+        volume_24h      = 18_500_000,
+        fdv             = 380_000_000,
+        fdv_mcap_ratio  = 1.52,
+        circ_supply_pct = 65.8,
+        matched_tags    = ["layer-2"],
+        mexc_symbol     = "TEST_USDT",
+        tech            = tech,
+        fund            = fund,
+        total_score     = 100,
+        recommendation  = "STRONG ENTRY",
+        rec_emoji       = "🟢",
+        warnings        = ["TEST ALERT — not a real signal"],
+        entry_price     = 0.5145,
+        stop_loss       = 0.4836,
+        tp1             = 0.5660,
+        tp2             = 0.6174,
+        risk_usd        = 6.0,
+        reward_tp1_usd  = 10.0,
+        reward_tp2_usd  = 20.0,
+        rr_str          = "1:1.67",
+        sl_pct          = 6.0,
+    )
+
+
+def send_test_alert() -> bool:
+    """
+    Send a test momentum alert via /test command.
+    Uses build_momentum_alert() so the format is identical to a real alert.
+    """
+    log.info("Sending /test delivery alert…")
+    header = "🔔 <b>TEST ALERT — delivery check</b>\n<i>Format is identical to a real signal.</i>\n\n"
+    body   = build_momentum_alert(_make_test_momentum_result())
+    return send_message(header + body)
+
+
+def send_startup_ping() -> bool:
+    """
+    Minimal one-line ping sent immediately on bot start.
+    Confirms alert delivery is working before the first real scan fires.
+    """
+    log.info("Sending startup delivery ping…")
+    return send_message(
+        "🔔 Alert delivery test — if you see this, alerts are working ✅"
+    )
+
+
 def send_momentum_cooling_alert(coin) -> bool:
     """Send a Module 5 cooling-down watchlist alert to Telegram."""
     t = coin.tech
