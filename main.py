@@ -299,6 +299,22 @@ async def _command_poll_async() -> None:
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(None, m4.send_test_alert)
                     log.info("/test replied.")
+                elif text.startswith("/chatid"):
+                    reply = (
+                        f"Your chat ID: <code>{chat_id}</code>\n"
+                        f"Configured TELEGRAM_CHAT_ID: <code>{authorized}</code>\n"
+                        + ("✅ They match — alerts should reach you."
+                           if chat_id == authorized else
+                           "❌ MISMATCH — alerts are going to the wrong chat!\n"
+                           f"Set TELEGRAM_CHAT_ID=<code>{chat_id}</code> in Railway env vars.")
+                    )
+                    async with bot:
+                        await bot.send_message(
+                            chat_id    = chat_id,
+                            text       = reply,
+                            parse_mode = ParseMode.HTML,
+                        )
+                    log.info(f"/chatid: incoming={chat_id} configured={authorized}")
         except Exception as exc:
             log.warning(f"Command poll error (will retry): {exc}")
             await asyncio.sleep(10)
