@@ -64,16 +64,17 @@ async def _send_async(text: str) -> bool:
         log.error("TELEGRAM_BOT_TOKEN not set — cannot send.")
         return False
     try:
+        log.debug(f"Sending to chat_id={cfg.TELEGRAM_CHAT_ID!r}")
         async with Bot(token=cfg.TELEGRAM_BOT_TOKEN) as bot:
             await bot.send_message(
-                chat_id                  = cfg.TELEGRAM_CHAT_ID,
+                chat_id                  = int(cfg.TELEGRAM_CHAT_ID),
                 text                     = text,
                 parse_mode               = ParseMode.HTML,
                 disable_web_page_preview = True,
             )
         return True
     except Exception as e:
-        log.error(f"Telegram send failed: {e}")
+        log.error(f"Telegram send failed (chat_id={cfg.TELEGRAM_CHAT_ID!r}): {e}")
         return False
 
 
