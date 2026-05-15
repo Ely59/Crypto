@@ -51,37 +51,26 @@ log = get_logger(__name__)
 # Stuttgart = Central European Time, auto-switches CET↔CEST
 _STUTTGART_TZ = ZoneInfo("Europe/Berlin")
 
-# Lazily created bot singleton
-_bot: Bot | None = None
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Core send infrastructure
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _get_bot() -> Bot:
-    global _bot
-    if _bot is None:
-        if not cfg.TELEGRAM_BOT_TOKEN:
-            raise ValueError(
-                "TELEGRAM_BOT_TOKEN not set — copy .env.example → .env and fill in the token."
-            )
-        _bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN)
-    return _bot
-
 
 async def _send_async(text: str) -> bool:
     """Send a single Telegram message asynchronously. Returns True on success."""
     if not cfg.TELEGRAM_CHAT_ID:
         log.error("TELEGRAM_CHAT_ID not set — cannot send.")
         return False
+    if not cfg.TELEGRAM_BOT_TOKEN:
+        log.error("TELEGRAM_BOT_TOKEN not set — cannot send.")
+        return False
     try:
-        await _get_bot().send_message(
-            chat_id                  = cfg.TELEGRAM_CHAT_ID,
-            text                     = text,
-            parse_mode               = ParseMode.HTML,
-            disable_web_page_preview = True,
-        )
+        async with Bot(token=cfg.TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(
+                chat_id                  = cfg.TELEGRAM_CHAT_ID,
+                text                     = text,
+                parse_mode               = ParseMode.HTML,
+                disable_web_page_preview = True,
+            )
         return True
     except Exception as e:
         log.error(f"Telegram send failed: {e}")
