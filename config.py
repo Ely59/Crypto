@@ -231,7 +231,7 @@ MOMENTUM_TA_15M_LIMIT     = 60     # 15m candles (≈ 15 hours of data)
 
 # ─── Golden Cross signal ──────────────────────────────────────────────────────
 MOMENTUM_GC_1H_MIN      = 0.5    # minimum 1H gain for GC candidates
-MOMENTUM_GC_1H_MAX      = 5.0    # maximum 1H gain (was 6.0)
+MOMENTUM_GC_1H_MAX      = 8.0    # maximum 1H gain (raised from 5.0 — fast pumps hit GC at 6-7%)
 MOMENTUM_GC_RSI_MAX     = 72.0   # 15m RSI ceiling for GC (was 65.0 — 72 still below overbought)
 MOMENTUM_GC_SL_PCT      = 5.0    # stop-loss % for GOLDEN CROSS alerts
 MOMENTUM_GC_EARLY_1H_MIN = 0.8   # boundary: below = pure GC vol, above = early-detection vol (was 1.0)
@@ -242,6 +242,31 @@ MOMENTUM_VOL_SLOW_MIN  = 0.55   # slow trend (1H 2-5%): vol > 55% MA10 (was 80%)
 MOMENTUM_VOL_EARLY_MIN = 0.30   # early detection (1H 0.8-5%): vol > 30% MA10 (was 0.45)
 MOMENTUM_VOL_GC_MIN    = 0.30   # pure GC zone (1H 0.5-0.8%): vol > 30% MA10 (was 0.40)
 MOMENTUM_VOL_GC_WARN   = 0.40   # below this at cross → "low volume" warning in Telegram
+
+# ─── Volume Spike signal (FIX 2) ─────────────────────────────────────────────
+MOMENTUM_VS_1H_MIN   = 1.0    # min 1H gain to be a VS candidate
+MOMENTUM_VS_1H_MAX   = 6.0    # max 1H gain for VS (keeps it pre-breakout)
+MOMENTUM_VS_VOL_MULT = 3.0    # current 15m vol must be ≥ 3× avg of prior 3 candles
+MOMENTUM_VS_RSI_MAX  = 75.0   # 15m RSI ceiling for VS alerts
+MOMENTUM_VS_SL_PCT   = 5.0    # SL % for Volume Spike alerts
+
+# ─── Recovery Bounce signal (FIX 3) ──────────────────────────────────────────
+MOMENTUM_RB_1H_MIN       = 2.0    # min 1H gain (coin is actively bouncing)
+MOMENTUM_RB_1H_MAX       = 8.0    # max 1H gain (not yet overextended)
+MOMENTUM_RB_PEAK_PCT     = 12.0   # h24_high must be ≥ 12% above current price or low
+MOMENTUM_RB_PULLBACK_PCT = 8.0    # coin must be ≥ 8% below h24_high (real pullback happened)
+MOMENTUM_RB_KDJ_MAX      = 85.0   # 4H KDJ must be < 85 (cooled after the pump)
+MOMENTUM_RB_TP1_PCT      = 8.0    # conservative TP1 (below old peak)
+MOMENTUM_RB_TP2_PCT      = 15.0   # optimistic TP2 (still below old peak for most cases)
+MOMENTUM_RB_SL_PCT       = 5.0    # tight SL — old peak is overhead resistance
+
+# ─── FIX 4: KDJ as warning + dead zone + ATH distance bonus ──────────────────
+MOMENTUM_DEAD_VOL_PCT    = 0.15   # vol < 15% of MA10 = dead volume
+MOMENTUM_DEAD_1H_MAX     = 3.0    # block only if dead vol AND 1H < 3% (low momentum confirmed)
+MOMENTUM_ATH_DIST_L1     = 80.0   # > 80% below 16D peak → +3 pts
+MOMENTUM_ATH_DIST_L2     = 90.0   # > 90% below 16D peak → +5 pts
+MOMENTUM_ATH_DIST_L1_PTS = 3
+MOMENTUM_ATH_DIST_L2_PTS = 5
 
 # CMC tag slugs for allowed categories (used for set membership check)
 MOMENTUM_ALLOWED_TAGS = frozenset({

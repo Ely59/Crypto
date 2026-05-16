@@ -226,6 +226,10 @@ def run_momentum_scan():
             m4.send_momentum_cooling_alert(coin)
         elif coin.recommendation == "GOLDEN CROSS":
             m4.send_golden_cross_alert(coin)
+        elif coin.recommendation == "VOLUME SPIKE":
+            m4.send_volume_spike_alert(coin)
+        elif coin.recommendation == "RECOVERY":
+            m4.send_recovery_alert(coin)
         else:
             m4.send_momentum_alert(coin)
         sent += 1

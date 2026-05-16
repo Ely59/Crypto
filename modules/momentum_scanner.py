@@ -142,6 +142,18 @@ class TechResult:
     # True if EMA6 just crossed above EMA20 on 15m within the last 2 candles
     m15_golden_cross: bool
 
+    # 15m Volume Spike — current candle vol vs avg of prior 3
+    m15_vol_spike:       bool    # vol_last ≥ VS_VOL_MULT × avg_prev3
+    m15_vol_spike_ratio: float   # actual ratio for alert display
+
+    # 4H price range over last 24H (6 × 4H candles) — for Recovery Bounce
+    h24_high:     float   # max 4H candle high over last 6 candles
+    h24_low:      float   # min 4H candle low  over last 6 candles
+
+    # 16-day peak (all fetched 4H candles) — for ATH distance bonus
+    h16d_high:    float   # max 4H candle high over all fetched candles
+    ath_dist_pct: float   # % below h16d_high  (higher = farther from peak)
+
     # Technical score (0-60)
     score: int
 
@@ -184,6 +196,9 @@ class MomentumResult:
     rec_emoji:       str  = ""         # "🟢", "🟡", "🟠"
 
     warnings:        list[str] = field(default_factory=list)
+
+    # ATH distance bonus (computed from tech.ath_dist_pct, added to total_score)
+    ath_pts:         int  = 0
 
     # Trade levels (fixed-% framework, $100 position)
     entry_price:    float = 0.0
@@ -246,6 +261,34 @@ def _mark_gc_alerted(symbol: str) -> None:
     stale = time.time() - 86_400
     for k in [k for k, ts in _gc_alerted.items() if ts < stale]:
         del _gc_alerted[k]
+
+
+_vs_alerted: dict[str, float] = {}
+
+
+def _on_vs_cooldown(symbol: str) -> bool:
+    return (time.time() - _vs_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+
+
+def _mark_vs_alerted(symbol: str) -> None:
+    _vs_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in _vs_alerted.items() if ts < stale]:
+        del _vs_alerted[k]
+
+
+_rb_alerted: dict[str, float] = {}
+
+
+def _on_rb_cooldown(symbol: str) -> bool:
+    return (time.time() - _rb_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+
+
+def _mark_rb_alerted(symbol: str) -> None:
+    _rb_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in _rb_alerted.items() if ts < stale]:
+        del _rb_alerted[k]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -319,9 +362,10 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
 
     _, _, j4h = compute_kdj(df_4h)
     h4_kdj_j  = float(j4h.iloc[-1])
-    h4_kdj_ok = h4_kdj_j < cfg.MOMENTUM_TA_H4_KDJ_J_MAX
+    h4_kdj_ok = h4_kdj_j < cfg.MOMENTUM_TA_H4_KDJ_J_MAX   # informational only — no longer a hard gate
 
-    macro_ok = h4_ema_ok and h4_kdj_ok
+    # FIX 4: KDJ is a warning, not a blocker — only EMA stack gates entry
+    macro_ok = h4_ema_ok
 
     # ── 4H Volume ────────────────────────────────────────────────────────────
     vol_last = float(df_4h["volume"].iloc[-1])
@@ -375,6 +419,22 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     m15_change = ((float(close_15m.iloc[-1]) - float(close_15m.iloc[-2])) /
                    float(close_15m.iloc[-2]) * 100.0) if len(close_15m) >= 2 else 0.0
 
+    # ── 15m Volume Spike ─────────────────────────────────────────────────────
+    vol_15m         = df_15m["volume"]
+    m15_vol_last    = float(vol_15m.iloc[-1])
+    m15_vol_prev3   = float(vol_15m.iloc[-4:-1].mean()) if len(vol_15m) >= 4 else m15_vol_last
+    m15_vol_spike_ratio = m15_vol_last / m15_vol_prev3 if m15_vol_prev3 > 0 else 0.0
+    m15_vol_spike   = m15_vol_spike_ratio >= cfg.MOMENTUM_VS_VOL_MULT
+
+    # ── 4H price ranges ──────────────────────────────────────────────────────
+    h4_highs  = df_4h["high"]
+    h4_lows   = df_4h["low"]
+    h24_high  = float(h4_highs.iloc[-6:].max())   # 6 × 4H = 24H
+    h24_low   = float(h4_lows.iloc[-6:].min())
+    h16d_high = float(h4_highs.max())             # full kline window ≈ 16 days
+    ath_dist_pct = ((h16d_high - float(close_4h.iloc[-1])) / h16d_high * 100.0
+                    if h16d_high > 0 else 0.0)
+
     return TechResult(
         h4_ema6=round(h4_ema6, 8),    h4_ema12=round(h4_ema12, 8),  h4_ema20=round(h4_ema20, 8),
         h4_ema_ok=h4_ema_ok,          h4_ema_sep=round(h4_ema_sep * 100, 3),
@@ -392,6 +452,12 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         vol_pct=round(vol_pct, 1),     vol_ok=vol_ok,  vol_pts=vol_pts,
         m15_change=round(m15_change, 2),
         m15_golden_cross=m15_golden_cross,
+        m15_vol_spike=m15_vol_spike,
+        m15_vol_spike_ratio=round(m15_vol_spike_ratio, 2),
+        h24_high=round(h24_high, 8),
+        h24_low=round(h24_low, 8),
+        h16d_high=round(h16d_high, 8),
+        ath_dist_pct=round(ath_dist_pct, 1),
         score=score,
     )
 
@@ -433,6 +499,8 @@ def _generate_warnings(tech: TechResult, change_1h: float,
     """Return up to 3 auto-generated risk warning strings (highest priority first)."""
     warns: list[str] = []
 
+    if tech.h4_kdj_j >= cfg.MOMENTUM_TA_H4_KDJ_J_MAX:
+        warns.append(f"4H KDJ overheated ({tech.h4_kdj_j:.0f}) — strong move but watch for reversal")
     if tech.m15_rsi6 > cfg.MOMENTUM_WARN_RSI6_PCT:
         warns.append("RSI approaching overbought")
     if tech.m15_kdj_j > cfg.MOMENTUM_WARN_KDJ_J_PCT:
@@ -482,7 +550,9 @@ def scan() -> list[MomentumResult]:
 
     # ── Stage 1: M1–M7 ───────────────────────────────────────────────────────
     candidates    = []   # 2-10% 1H gain — main scoring pipeline
-    gc_candidates = []   # 0.5-6% 1H gain — Golden Cross pipeline
+    gc_candidates = []   # 0.5-8% 1H gain — Golden Cross pipeline
+    vs_candidates = []   # 1-6%  1H gain — Volume Spike pre-signal pipeline
+    rb_candidates = []   # 2-8%  1H gain — Recovery Bounce pipeline (24H negative)
 
     for coin in coins:
         symbol = coin.get("symbol", "").upper()
@@ -529,9 +599,12 @@ def scan() -> list[MomentumResult]:
         if mexc_symbol not in futures_set:
             continue
 
-        # Pipeline assignment: main (2-10%), GC (0.5-6%), or both (2-6%)
-        in_main = change_1h >= cfg.MOMENTUM_ZONE_MIN   # >= 2.0%
-        in_gc   = change_1h <= cfg.MOMENTUM_GC_1H_MAX  # <= 6.0%
+        # Pipeline assignment
+        in_main = change_1h >= cfg.MOMENTUM_ZONE_MIN                              # 2-10%
+        in_gc   = change_1h <= cfg.MOMENTUM_GC_1H_MAX                             # 0.5-8%
+        in_vs   = cfg.MOMENTUM_VS_1H_MIN <= change_1h <= cfg.MOMENTUM_VS_1H_MAX   # 1-6%
+        in_rb   = (cfg.MOMENTUM_RB_1H_MIN <= change_1h <= cfg.MOMENTUM_RB_1H_MAX  # 2-8%
+                   and change_24h < -3.0)                                          # bouncing after pullback
 
         entry_tuple = (
             symbol, name, matched_tags, mexc_symbol,
@@ -548,10 +621,18 @@ def scan() -> list[MomentumResult]:
             if not in_main:
                 log.info(f"  GC cand  {symbol:<10}  1h {change_1h:+.2f}%  [{matched_tags[0]}]")
             gc_candidates.append(entry_tuple)
+        if in_vs and not in_main:
+            log.info(f"  VS cand  {symbol:<10}  1h {change_1h:+.2f}%  [{matched_tags[0]}]")
+            vs_candidates.append(entry_tuple)
+        if in_rb:
+            rb_candidates.append(entry_tuple)
 
     global _last_m1m7_count, _last_macro_blocked
     _last_m1m7_count = len(candidates)
-    log.info(f"Stage 1: {len(candidates)} passed M1–M7, {len(gc_candidates)} GC candidates.")
+    log.info(
+        f"Stage 1: {len(candidates)} M1–M7, {len(gc_candidates)} GC, "
+        f"{len(vs_candidates)} VS, {len(rb_candidates)} RB candidates."
+    )
 
     # ── Stages 2 + 3: TA gate + full scoring ─────────────────────────────────
     scored:              list[MomentumResult] = []
@@ -581,60 +662,37 @@ def scan() -> list[MomentumResult]:
             log.warning(f"  TA skip  {symbol}: futures kline data unavailable")
             continue
 
-        # Dynamic 4H KDJ: slow-trend coins (1H <5%) may pass with KDJ up to 100
-        # provided 15m RSI is below MOMENTUM_SLOW_RSI_MAX (65) — slower trends are
-        # naturally hotter on 4H KDJ without meaning the move is overextended
-        if not tech.macro_ok and tech.h4_ema_ok and not tech.h4_kdj_ok:
-            effective_macro_ok = (
-                change_1h < cfg.MOMENTUM_EARLY_1H_MAX and
-                tech.h4_kdj_j < 100 and
-                tech.m15_rsi6 < cfg.MOMENTUM_SLOW_RSI_MAX
-            )
-        else:
-            effective_macro_ok = tech.macro_ok
-
-        if not effective_macro_ok:
+        # FIX 4: macro gate = EMA stack only (KDJ no longer hard-blocks)
+        if not tech.macro_ok:
             macro_blocked_count += 1
-            reasons = []
-            if not tech.h4_ema_ok:
-                reasons.append(
-                    f"EMA bearish  ({tech.h4_ema6:.4g} < {tech.h4_ema12:.4g} "
-                    f"or {tech.h4_ema12:.4g} < {tech.h4_ema20:.4g})"
-                )
-            if not tech.h4_kdj_ok:
-                reasons.append(f"4H KDJ J {tech.h4_kdj_j:.1f} ≥ {cfg.MOMENTUM_TA_H4_KDJ_J_MAX:.0f}")
-            log.info(f"  MACRO ✗  {symbol}: {', '.join(reasons)}")
+            log.info(
+                f"  MACRO ✗  {symbol}: EMA bearish  "
+                f"({tech.h4_ema6:.4g}/{tech.h4_ema12:.4g}/{tech.h4_ema20:.4g})"
+            )
+            continue
 
-            # Cooling alert: trend is bullish (EMA stack OK) but KDJ is overheated
-            # and the dynamic slow-trend exception didn't promote this coin
-            if tech.h4_ema_ok and not tech.h4_kdj_ok:
-                if not _on_cooling_cooldown(symbol):
-                    log.info(f"  ⏳ COOLING  {symbol}: KDJ J {tech.h4_kdj_j:.1f} — queuing alert")
-                    cooling_alerts.append(MomentumResult(
-                        symbol          = symbol,
-                        name            = name,
-                        price           = round(price, 8),
-                        change_1h       = round(change_1h, 2),
-                        change_24h      = round(change_24h, 2),
-                        market_cap      = mcap,
-                        volume_24h      = vol_24h,
-                        fdv             = fdv,
-                        fdv_mcap_ratio  = round(fdv_ratio, 2),
-                        circ_supply_pct = round(circ_pct, 1),
-                        matched_tags    = matched_tags,
-                        mexc_symbol     = mexc_symbol,
-                        tech            = tech,
-                        recommendation  = "COOLING_DOWN",
-                        rec_emoji       = "⏳",
-                    ))
-                    _mark_cooling_alerted(symbol)
-            continue  # macro gate failed
+        # FIX 4: dead-zone blocker — very low volume AND low momentum = skip
+        if (tech.vol_pct < cfg.MOMENTUM_DEAD_VOL_PCT * 100 and
+                change_1h < cfg.MOMENTUM_DEAD_1H_MAX):
+            log.info(
+                f"  DEAD ZONE {symbol}: vol {tech.vol_pct:.0f}% + 1H {change_1h:+.1f}% "
+                f"— no momentum"
+            )
+            continue
 
         # Fundamental bonus
         fund = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
 
+        # ATH distance bonus (FIX 4)
+        if tech.ath_dist_pct > cfg.MOMENTUM_ATH_DIST_L2:
+            ath_pts = cfg.MOMENTUM_ATH_DIST_L2_PTS   # > 90% below 16D peak → +5
+        elif tech.ath_dist_pct > cfg.MOMENTUM_ATH_DIST_L1:
+            ath_pts = cfg.MOMENTUM_ATH_DIST_L1_PTS   # > 80% below 16D peak → +3
+        else:
+            ath_pts = 0
+
         # Total score
-        total = tech.score + fund.total
+        total = tech.score + fund.total + ath_pts
 
         # Recommendation classification
         if total >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:
@@ -704,6 +762,7 @@ def scan() -> list[MomentumResult]:
             recommendation  = recommendation,
             rec_emoji       = rec_emoji,
             warnings        = warnings,
+            ath_pts         = ath_pts,
             entry_price     = round(price, 8),
             stop_loss       = round(price * coin_sl_factor, 8),
             tp1             = round(price * _tp1_factor, 8),
@@ -802,18 +861,166 @@ def scan() -> list[MomentumResult]:
             sl_pct          = cfg.MOMENTUM_GC_SL_PCT,
         ))
 
+    # ── Stage 2c: Volume Spike pipeline ──────────────────────────────────────
+    vs_alerts: list[MomentumResult] = []
+    alerted_symbols = {r.symbol for r in new_alerts + gc_alerts}
+
+    for entry in vs_candidates:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
+
+        if symbol in alerted_symbols:
+            continue
+        if _on_vs_cooldown(symbol):
+            log.debug(f"  VS COOLDOWN: {symbol}")
+            continue
+
+        tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
+        if tech is None:
+            continue
+        if not tech.m15_vol_spike:
+            log.debug(f"  VS skip {symbol}: vol ratio {tech.m15_vol_spike_ratio:.1f}× < {cfg.MOMENTUM_VS_VOL_MULT}×")
+            continue
+        if not tech.h4_ema_ok:
+            log.debug(f"  VS skip {symbol}: 4H EMA bearish")
+            continue
+        if tech.m15_rsi6 >= cfg.MOMENTUM_VS_RSI_MAX:
+            log.debug(f"  VS skip {symbol}: RSI {tech.m15_rsi6:.1f} ≥ {cfg.MOMENTUM_VS_RSI_MAX}")
+            continue
+
+        log.info(
+            f"  ⚡ VOL SPIKE  {symbol}  1h {change_1h:+.2f}%  "
+            f"vol {tech.m15_vol_spike_ratio:.1f}×  RSI {tech.m15_rsi6:.1f}"
+        )
+        _mark_vs_alerted(symbol)
+
+        vs_sl_factor = 1.0 - cfg.MOMENTUM_VS_SL_PCT / 100.0
+        vs_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_VS_SL_PCT / 100.0, 2)
+
+        vs_alerts.append(MomentumResult(
+            symbol          = symbol,
+            name            = name,
+            price           = round(price, 8),
+            change_1h       = round(change_1h, 2),
+            change_24h      = round(change_24h, 2),
+            market_cap      = mcap,
+            volume_24h      = vol_24h,
+            fdv             = fdv,
+            fdv_mcap_ratio  = round(fdv_ratio, 2),
+            circ_supply_pct = round(circ_pct, 1),
+            matched_tags    = matched_tags,
+            mexc_symbol     = mexc_symbol,
+            tech            = tech,
+            recommendation  = "VOLUME SPIKE",
+            rec_emoji       = "⚡",
+            entry_price     = round(price, 8),
+            stop_loss       = round(price * vs_sl_factor, 8),
+            tp1             = round(price * _tp1_factor, 8),
+            tp2             = round(price * _tp2_factor, 8),
+            risk_usd        = vs_risk_usd,
+            reward_tp1_usd  = _rwd_tp1,
+            reward_tp2_usd  = _rwd_tp2,
+            rr_str          = f"1:{_rwd_tp1 / vs_risk_usd:.2f}",
+            sl_pct          = cfg.MOMENTUM_VS_SL_PCT,
+        ))
+
+    # ── Stage 2d: Recovery Bounce pipeline ───────────────────────────────────
+    rb_alerts: list[MomentumResult] = []
+    alerted_symbols = {r.symbol for r in new_alerts + gc_alerts + vs_alerts}
+
+    for entry in rb_candidates:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
+
+        if symbol in alerted_symbols:
+            continue
+        if _on_rb_cooldown(symbol):
+            log.debug(f"  RB COOLDOWN: {symbol}")
+            continue
+
+        tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_SLOW_MIN)
+        if tech is None:
+            continue
+
+        current       = tech.m15_price
+        h24_high      = tech.h24_high
+        h24_low       = tech.h24_low
+        peak_pct      = cfg.MOMENTUM_RB_PEAK_PCT / 100.0
+        pullback_pct  = cfg.MOMENTUM_RB_PULLBACK_PCT / 100.0
+
+        peak_above_current = h24_high >= current * (1.0 + peak_pct)
+        peak_above_low     = h24_high >= h24_low  * (1.0 + peak_pct)
+        real_pullback      = (h24_high - current) / h24_high >= pullback_pct if h24_high > 0 else False
+
+        if not (peak_above_current or peak_above_low):
+            log.debug(f"  RB skip {symbol}: h24_high {h24_high:.4g} not 12%+ above current {current:.4g}")
+            continue
+        if not real_pullback:
+            log.debug(f"  RB skip {symbol}: pullback only {(h24_high - current)/h24_high*100:.1f}% < 8%")
+            continue
+        if not tech.h4_ema_ok:
+            log.debug(f"  RB skip {symbol}: 4H EMA bearish")
+            continue
+        if tech.h4_kdj_j >= cfg.MOMENTUM_RB_KDJ_MAX:
+            log.debug(f"  RB skip {symbol}: 4H KDJ {tech.h4_kdj_j:.1f} ≥ {cfg.MOMENTUM_RB_KDJ_MAX} (not cooled)")
+            continue
+
+        pullback_shown = (h24_high - current) / h24_high * 100
+        log.info(
+            f"  ♻️ RECOVERY  {symbol}  1h {change_1h:+.2f}%  "
+            f"peak {h24_high:.4g}  pullback {pullback_shown:.1f}%  KDJ {tech.h4_kdj_j:.1f}"
+        )
+        _mark_rb_alerted(symbol)
+
+        rb_sl_factor  = 1.0 - cfg.MOMENTUM_RB_SL_PCT / 100.0
+        rb_tp1_factor = 1.0 + cfg.MOMENTUM_RB_TP1_PCT / 100.0
+        rb_tp2_factor = 1.0 + cfg.MOMENTUM_RB_TP2_PCT / 100.0
+        rb_risk_usd   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_SL_PCT / 100.0, 2)
+        rb_rwd_tp1    = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_TP1_PCT / 100.0, 2)
+        rb_rwd_tp2    = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_TP2_PCT / 100.0, 2)
+
+        rb_alerts.append(MomentumResult(
+            symbol          = symbol,
+            name            = name,
+            price           = round(price, 8),
+            change_1h       = round(change_1h, 2),
+            change_24h      = round(change_24h, 2),
+            market_cap      = mcap,
+            volume_24h      = vol_24h,
+            fdv             = fdv,
+            fdv_mcap_ratio  = round(fdv_ratio, 2),
+            circ_supply_pct = round(circ_pct, 1),
+            matched_tags    = matched_tags,
+            mexc_symbol     = mexc_symbol,
+            tech            = tech,
+            recommendation  = "RECOVERY",
+            rec_emoji       = "♻️",
+            entry_price     = round(price, 8),
+            stop_loss       = round(price * rb_sl_factor, 8),
+            tp1             = round(price * rb_tp1_factor, 8),
+            tp2             = round(price * rb_tp2_factor, 8),
+            risk_usd        = rb_risk_usd,
+            reward_tp1_usd  = rb_rwd_tp1,
+            reward_tp2_usd  = rb_rwd_tp2,
+            rr_str          = f"1:{rb_rwd_tp1 / rb_risk_usd:.2f}",
+            sl_pct          = cfg.MOMENTUM_RB_SL_PCT,
+        ))
+
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
     early   = sum(r.recommendation == "EARLY SIGNAL" for r in new_alerts)
     gc      = len(gc_alerts)
+    vs      = len(vs_alerts)
+    rb      = len(rb_alerts)
     cooling = len(cooling_alerts)
     log.info(
         f"Scan done — {len(candidates)} M1–M7, "
         f"{macro_blocked_count} macro-blocked, "
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
-        f"{strong} STRONG + {watch} WATCH + {early} EARLY + {gc} GC + {cooling} COOLING alerts."
+        f"{strong} STRONG + {watch} WATCH + {early} EARLY + "
+        f"{gc} GC + {vs} VS + {rb} RB + {cooling} COOLING alerts."
     )
-    return new_alerts + cooling_alerts + gc_alerts
+    return new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts
 
 
 # ══════════════════════════════════════════════════════════════════════════════

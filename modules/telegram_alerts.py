@@ -939,11 +939,12 @@ def build_momentum_alert(coin) -> str:
         lines.append("<i>Move just starting — tighter SL advised</i>")
 
     if t is not None:
+        kdj_note = (f" ⚠️ {t.h4_kdj_j:.0f}" if not t.h4_kdj_ok else f" {t.h4_kdj_j:.0f}")
         lines += [
             "",
             f"📊 <b>TECHNICAL: {tech_score}/{_PTS_MAX}</b>",
             "",
-            f"4H Trend: {ck(t.h4_ema_ok)} | 4H KDJ: {ck(t.h4_kdj_ok)}",
+            f"4H Trend: {ck(t.h4_ema_ok)} | 4H KDJ:{kdj_note}",
             "",
             f"15m EMA: {ck(t.m15_ema_ok)} | RSI: {ck(t.m15_rsi6_ok)} {t.m15_rsi6:.1f}",
             "",
@@ -951,6 +952,9 @@ def build_momentum_alert(coin) -> str:
             "",
             f"Volume: {ck(t.vol_ok)} {t.vol_pct:.0f}% of MA10",
         ]
+
+    if coin.ath_pts > 0 and coin.tech is not None:
+        lines.append(f"📊 ATH distance: -{coin.tech.ath_dist_pct:.0f}% from 16D peak (+{coin.ath_pts} pts)")
 
     lines += [
         "",
@@ -1033,6 +1037,9 @@ def _make_test_momentum_result():
         m15_macd_ok=True,  m15_macd_pts=5,
         vol_pct=187.0,     vol_ok=True,        vol_pts=10,
         m15_change=1.8,    m15_golden_cross=False,
+        m15_vol_spike=False, m15_vol_spike_ratio=1.1,
+        h24_high=0.5280,   h24_low=0.4980,
+        h16d_high=0.6500,  ath_dist_pct=20.8,
         score=60,
     )
     fund = FundResult(mcap_pts=15, circ_pts=10, fdv_pts=10, gain_pts=5, total=40)
@@ -1096,6 +1103,69 @@ def send_momentum_cooling_alert(coin) -> bool:
     kdj_val = f"{t.h4_kdj_j:.1f}" if t is not None else "N/A"
     log.info(f"Sending COOLING alert for {coin.symbol} (KDJ J {kdj_val})…")
     return send_message(build_momentum_cooling_alert(coin))
+
+
+def build_volume_spike_alert(coin) -> str:
+    """
+    Pre-signal alert: current 15m candle volume ≥ 3× avg of prior 3 candles.
+    Fires before a GC or main breakout — early warning, not a confirmed entry.
+    """
+    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    t = coin.tech
+    ratio = f"{t.m15_vol_spike_ratio:.1f}" if t is not None else "?"
+
+    lines = [
+        f"⚡ <b>VOLUME SPIKE: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
+        f"Volume <b>{ratio}×</b> normal — move may be starting.",
+        "Watch for entry. Not confirmed yet.",
+        "",
+        f"Price: <b>{_usd(coin.entry_price)}</b>  |  SL if entering: -5% = <b>{_usd(coin.stop_loss)}</b>",
+        "",
+        "⚠️ <i>Pre-signal only — wait for GC or breakout confirmation before entry</i>",
+        f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
+    ]
+    return "\n".join(lines)
+
+
+def send_volume_spike_alert(coin) -> bool:
+    """Send a Module 5 Volume Spike pre-signal alert to Telegram."""
+    log.info(f"Sending VOLUME SPIKE alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
+    return send_message(build_volume_spike_alert(coin))
+
+
+def build_recovery_alert(coin) -> str:
+    """
+    Recovery Bounce alert: coin pulled back ≥8% from its 24H high
+    and is now rising again with bullish 4H EMA.
+    """
+    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    t = coin.tech
+    prev_peak = _usd(t.h24_high) if t is not None else "?"
+    pullback_pct = ((t.h24_high - coin.entry_price) / t.h24_high * 100) if t is not None and t.h24_high > 0 else 0.0
+
+    lines = [
+        f"♻️ <b>RECOVERY: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
+        f"Post-pump bounce — previous 24H peak: <b>{prev_peak}</b>",
+        f"Pulled back <b>{pullback_pct:.1f}%</b> — now recovering.",
+        "",
+        f"Entry: <b>{_usd(coin.entry_price)}</b>",
+        f"SL: -5% (tight — peak overhead) = <b>{_usd(coin.stop_loss)}</b>",
+        f"TP1: +{cfg.MOMENTUM_RB_TP1_PCT:.0f}% → <b>{_usd(coin.tp1)}</b> (conservative)",
+        f"TP2: +{cfg.MOMENTUM_RB_TP2_PCT:.0f}% → <b>{_usd(coin.tp2)}</b> (below old peak)",
+        "",
+        "⚠️ <i>Old peak acts as resistance — take partial profits early</i>",
+        f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
+    ]
+    return "\n".join(lines)
+
+
+def send_recovery_alert(coin) -> bool:
+    """Send a Module 5 Recovery Bounce alert to Telegram."""
+    log.info(
+        f"Sending RECOVERY alert for {coin.symbol} "
+        f"({coin.change_1h:+.2f}% 1h, pulled back from {coin.tech.h24_high if coin.tech else '?'})…"
+    )
+    return send_message(build_recovery_alert(coin))
 
 
 def build_golden_cross_alert(coin) -> str:
