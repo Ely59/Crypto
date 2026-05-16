@@ -214,7 +214,7 @@ def run_momentum_scan():
     _consecutive_failures = 0
 
     # Record stats regardless of whether results were returned
-    tracker.record_scan(results, m5._last_m1m7_count, m5._last_macro_blocked)
+    tracker.record_scan(results, m5._last_m1m7_count, m5._last_macro_blocked, m5._last_scan_outcomes)
 
     if not results:
         log.info("Momentum scan: no new alerts this cycle.")
@@ -275,6 +275,16 @@ async def _command_poll_async() -> None:
     offset     = 0
     authorized = str(cfg.TELEGRAM_CHAT_ID).strip()
 
+    async def _reply(to_chat: str, text: str) -> None:
+        """Send a command response, suppressing link previews."""
+        async with bot:
+            await bot.send_message(
+                chat_id                  = to_chat,
+                text                     = text,
+                parse_mode               = ParseMode.HTML,
+                disable_web_page_preview = True,
+            )
+
     log.info("Telegram command listener started (polling for /status).")
 
     while True:
@@ -319,6 +329,39 @@ async def _command_poll_async() -> None:
                             parse_mode = ParseMode.HTML,
                         )
                     log.info(f"/chatid: incoming={chat_id} configured={authorized}")
+                elif text.startswith("/coins"):
+                    history = tracker.get_scan_history()
+                    await _reply(chat_id, m4.build_coins_message(history))
+                    log.info("/coins replied.")
+                elif text.startswith("/top"):
+                    top = tracker.get_top_results()
+                    await _reply(chat_id, m4.build_top_message(top))
+                    log.info("/top replied.")
+                elif text.startswith("/best"):
+                    top = tracker.get_top_results()
+                    await _reply(chat_id, m4.build_best_message(top))
+                    log.info("/best replied.")
+                elif text.startswith("/filters"):
+                    await _reply(chat_id, m4.build_filters_message())
+                    log.info("/filters replied.")
+                elif text.startswith("/explain"):
+                    parts = text.split()
+                    if len(parts) < 2:
+                        await _reply(chat_id, "Usage: /explain COIN\nExample: /explain POLYX")
+                    else:
+                        history = tracker.get_scan_history()
+                        await _reply(chat_id, m4.build_explain_message(parts[1], history))
+                    log.info("/explain replied.")
+                elif text.startswith("/recovery"):
+                    await _reply(chat_id, m4.build_recovery_message(m5._last_rb_watchlist))
+                    log.info("/recovery replied.")
+                elif text.startswith("/summary"):
+                    stats = tracker.get_daily_summary()
+                    await _reply(chat_id, m4.build_summary_message(stats))
+                    log.info("/summary replied.")
+                elif text.startswith("/help"):
+                    await _reply(chat_id, m4.build_help_message())
+                    log.info("/help replied.")
         except Exception as exc:
             log.warning(f"Command poll error (will retry): {exc}")
             await asyncio.sleep(10)

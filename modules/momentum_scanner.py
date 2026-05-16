@@ -234,6 +234,37 @@ def _mark_alerted(symbol: str) -> None:
 _last_m1m7_count:    int = 0
 _last_macro_blocked: int = 0   # coins rejected at 4H macro gate per scan
 
+
+# ── Per-scan outcome tracking — read by main.py for command responses ─────────
+
+@dataclass
+class CandidateOutcome:
+    """What happened to each M1–M7 candidate in the last scan."""
+    symbol:    str
+    change_1h: float
+    score:     int    # 0 if blocked before scoring
+    rec:       str    # "ALERTED" | "MONITOR" | "BELOW_THRESHOLD" | "MACRO_BLOCKED"
+                      # | "DEAD_ZONE" | "NO_DATA" | "COOLDOWN" | "GC" | "VS" | "RB" | "COOLING"
+    detail:    str    # human-readable description
+    vol_pct:   float  # 4H vol% vs MA10 (0 if unavailable)
+    h4_kdj_j:  float  # 4H KDJ J value (0 if unavailable)
+
+
+@dataclass
+class RBWatchItem:
+    """Coin that has a recent 24H peak — near-miss recovery bounce candidate."""
+    symbol:       str
+    change_1h:    float
+    current:      float
+    h24_high:     float
+    pullback_pct: float   # % below h24_high
+    h4_ema_ok:    bool
+    h4_kdj_j:     float
+
+
+_last_scan_outcomes: list[CandidateOutcome] = []
+_last_rb_watchlist:  list[RBWatchItem]      = []
+
 # Separate cooldown for cooling alerts so they never block entry alerts
 _cooling_alerted: dict[str, float] = {}
 
@@ -627,7 +658,9 @@ def scan() -> list[MomentumResult]:
         if in_rb:
             rb_candidates.append(entry_tuple)
 
-    global _last_m1m7_count, _last_macro_blocked
+    global _last_m1m7_count, _last_macro_blocked, _last_scan_outcomes, _last_rb_watchlist
+    _last_scan_outcomes = []
+    _last_rb_watchlist  = []
     _last_m1m7_count = len(candidates)
     log.info(
         f"Stage 1: {len(candidates)} M1–M7, {len(gc_candidates)} GC, "
@@ -660,6 +693,7 @@ def scan() -> list[MomentumResult]:
 
         if tech is None:
             log.warning(f"  TA skip  {symbol}: futures kline data unavailable")
+            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "NO_DATA", "MEXC kline unavailable", 0.0, 0.0))
             continue
 
         # FIX 4: macro gate = EMA stack only (KDJ no longer hard-blocks)
@@ -669,6 +703,7 @@ def scan() -> list[MomentumResult]:
                 f"  MACRO ✗  {symbol}: EMA bearish  "
                 f"({tech.h4_ema6:.4g}/{tech.h4_ema12:.4g}/{tech.h4_ema20:.4g})"
             )
+            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "MACRO_BLOCKED", "4H EMA bearish", tech.vol_pct, tech.h4_kdj_j))
             continue
 
         # FIX 4: dead-zone blocker — very low volume AND low momentum = skip
@@ -678,6 +713,7 @@ def scan() -> list[MomentumResult]:
                 f"  DEAD ZONE {symbol}: vol {tech.vol_pct:.0f}% + 1H {change_1h:+.1f}% "
                 f"— no momentum"
             )
+            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "DEAD_ZONE", f"Vol {tech.vol_pct:.0f}% of MA10 + only {change_1h:.1f}% 1H", tech.vol_pct, tech.h4_kdj_j))
             continue
 
         # Fundamental bonus
@@ -714,9 +750,11 @@ def scan() -> list[MomentumResult]:
                 rec_emoji      = "🔍"
             elif total >= cfg.MOMENTUM_TOTAL_MONITOR:
                 log.info(f"  MONITOR  {symbol}: {total}/100 — logged only, no alert")
+                _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, total, "MONITOR", f"Score {total}/100 — below alert threshold ({cfg.MOMENTUM_TOTAL_WATCH})", tech.vol_pct, tech.h4_kdj_j))
                 continue
             else:
                 log.debug(f"  SKIP     {symbol}: {total}/100 < {cfg.MOMENTUM_TOTAL_MONITOR}")
+                _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, total, "BELOW_THRESHOLD", f"Score {total}/100 — too low", tech.vol_pct, tech.h4_kdj_j))
                 continue
 
         # SL parameters — tighter for EARLY SIGNAL (−4% vs standard −6%)
@@ -742,6 +780,8 @@ def scan() -> list[MomentumResult]:
             f"rsi {tech.m15_rsi6_pts}+kdj {tech.m15_kdj_pts}+"
             f"macd {tech.m15_macd_pts}+vol {tech.vol_pts}]"
         )
+
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, total, "ALERTED", recommendation, tech.vol_pct, tech.h4_kdj_j))
 
         scored.append(MomentumResult(
             symbol          = symbol,
@@ -791,6 +831,13 @@ def scan() -> list[MomentumResult]:
 
     _last_macro_blocked = macro_blocked_count
 
+    # Mark alerted outcomes that were suppressed by cooldown
+    _alerted_syms = {r.symbol for r in new_alerts}
+    for oc in _last_scan_outcomes:
+        if oc.rec == "ALERTED" and oc.symbol not in _alerted_syms:
+            oc.rec    = "COOLDOWN"
+            oc.detail = f"{oc.detail} — on 2H alert cooldown"
+
     # ── Stage 2b: Golden Cross pipeline ──────────────────────────────────────
     gc_alerts: list[MomentumResult] = []
     alerted_this_scan = {r.symbol for r in new_alerts}
@@ -829,6 +876,7 @@ def scan() -> list[MomentumResult]:
             f"RSI {tech.m15_rsi6:.1f}  Vol {tech.vol_pct:.0f}%"
         )
         _mark_gc_alerted(symbol)
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "GC", "GOLDEN CROSS", tech.vol_pct, tech.h4_kdj_j))
 
         gc_sl_factor = 1.0 - cfg.MOMENTUM_GC_SL_PCT / 100.0
         gc_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_GC_SL_PCT / 100.0, 2)
@@ -893,6 +941,7 @@ def scan() -> list[MomentumResult]:
             f"vol {tech.m15_vol_spike_ratio:.1f}×  RSI {tech.m15_rsi6:.1f}"
         )
         _mark_vs_alerted(symbol)
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "VS", "VOLUME SPIKE", tech.vol_pct, tech.h4_kdj_j))
 
         vs_sl_factor = 1.0 - cfg.MOMENTUM_VS_SL_PCT / 100.0
         vs_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_VS_SL_PCT / 100.0, 2)
@@ -955,6 +1004,18 @@ def scan() -> list[MomentumResult]:
         if not (peak_above_current or peak_above_low):
             log.debug(f"  RB skip {symbol}: h24_high {h24_high:.4g} not 12%+ above current {current:.4g}")
             continue
+
+        # Track near-miss for /recovery command (peak confirmed, may still fail pullback/KDJ)
+        _last_rb_watchlist.append(RBWatchItem(
+            symbol       = symbol,
+            change_1h    = round(change_1h, 2),
+            current      = round(current, 8),
+            h24_high     = round(h24_high, 8),
+            pullback_pct = round((h24_high - current) / h24_high * 100, 1) if h24_high > 0 else 0.0,
+            h4_ema_ok    = tech.h4_ema_ok,
+            h4_kdj_j     = tech.h4_kdj_j,
+        ))
+
         if not real_pullback:
             log.debug(f"  RB skip {symbol}: pullback only {(h24_high - current)/h24_high*100:.1f}% < 8%")
             continue
@@ -971,6 +1032,7 @@ def scan() -> list[MomentumResult]:
             f"peak {h24_high:.4g}  pullback {pullback_shown:.1f}%  KDJ {tech.h4_kdj_j:.1f}"
         )
         _mark_rb_alerted(symbol)
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "RB", "RECOVERY", tech.vol_pct, tech.h4_kdj_j))
 
         rb_sl_factor  = 1.0 - cfg.MOMENTUM_RB_SL_PCT / 100.0
         rb_tp1_factor = 1.0 + cfg.MOMENTUM_RB_TP1_PCT / 100.0

@@ -1229,7 +1229,8 @@ def build_m5_daily_summary(stats) -> str:
     stats is a DailyStats from modules.stats_tracker.
     """
     date_str     = stats.date.strftime("%d %B %Y")
-    total_alerts = stats.entry_alerts + stats.watch_alerts + stats.early_alerts + stats.gc_alerts
+    total_alerts = (stats.entry_alerts + stats.watch_alerts + stats.early_alerts +
+                    stats.gc_alerts + stats.vs_alerts + stats.rb_alerts)
     best_line    = (
         f"Best score: <b>{stats.best_coin} {stats.best_score}/100</b>"
         if stats.best_coin else "Best score: —"
@@ -1242,7 +1243,8 @@ def build_m5_daily_summary(stats) -> str:
         f"Coins analyzed: <b>{stats.coins_analyzed}</b>",
         f"Alerts sent: <b>{total_alerts}</b>"
         f"  (Entry: {stats.entry_alerts} | Watch: {stats.watch_alerts}"
-        f" | Early: {stats.early_alerts} | GC: {stats.gc_alerts})",
+        f" | Early: {stats.early_alerts} | GC: {stats.gc_alerts}"
+        f" | VS: {stats.vs_alerts} | RB: {stats.rb_alerts})",
         best_line,
         f"Missed (4H overheated): <b>{stats.cooling_alerts}</b> coins",
     ])
@@ -1251,6 +1253,188 @@ def build_m5_daily_summary(stats) -> str:
 def send_m5_daily_summary(stats) -> bool:
     log.info("Sending Module 5 daily summary…")
     return send_message(build_m5_daily_summary(stats))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Interactive command response builders (/coins, /top, /best, /filters, etc.)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_coins_message(scan_history: list) -> str:
+    """/coins — Coins from last 3 scans in compact list format."""
+    if not scan_history:
+        return "No scans recorded yet today. Try again after the next scan (:02/:17/:32/:47 UTC)."
+
+    lines = ["📋 <b>RECENT SCAN RESULTS</b>", ""]
+    _no_score = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "EARLY SIGNAL"}
+    for snap in reversed(scan_history):  # most recent first
+        lines.append(f"<b>🕐 {snap.timestamp}</b>")
+        if not snap.results:
+            lines.append("  No alerts this scan.")
+        else:
+            for r in snap.results:
+                score_part = f"  ({r.total_score}/100)" if r.recommendation not in _no_score else ""
+                lines.append(f"  {r.rec_emoji} <b>{r.symbol}</b> {r.change_1h:+.2f}% — {r.recommendation}{score_part}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_top_message(top_results: list) -> str:
+    """/top — Today's top 3 scored coins (compact summary)."""
+    if not top_results:
+        return "No scored coins today yet.\nBe patient — the first alert of the day usually appears by mid-morning."
+
+    lines = ["🏆 <b>TODAY'S TOP SCORED COINS</b>", ""]
+    for i, r in enumerate(top_results, 1):
+        lines += [
+            f"{i}. {r.rec_emoji} <b>{r.symbol}</b> — {r.total_score}/100 ({r.recommendation})",
+            f"   {r.change_1h:+.2f}% (1H)  |  Entry: {_usd(r.entry_price)}",
+            f"   SL: {_usd(r.stop_loss)}  TP1: {_usd(r.tp1)}  TP2: {_usd(r.tp2)}",
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def build_best_message(top_results: list) -> str:
+    """/best — Full alert for today's highest-scored coin."""
+    if not top_results:
+        return "No scored coins today yet."
+    return build_momentum_alert(top_results[0])
+
+
+def build_filters_message() -> str:
+    """/filters — All active filter thresholds."""
+    return "\n".join([
+        "⚙️ <b>ACTIVE FILTERS</b>",
+        "",
+        "<b>Stage 1 — Fundamental Screen</b>",
+        f"  1H gain:     {cfg.MOMENTUM_ZONE_MIN:.0f}% – {cfg.MOMENTUM_ZONE_MAX:.0f}%",
+        f"  MCap:        ${cfg.MOMENTUM_MCAP_MIN_USD/1e6:.0f}M – ${cfg.MOMENTUM_MCAP_MAX_USD/1e9:.0f}B",
+        f"  24H vol:     ≥${cfg.MOMENTUM_VOL_24H_MIN_USD/1e6:.0f}M",
+        f"  Circ supply: ≥{cfg.MOMENTUM_CIRC_SUPPLY_MIN_PCT:.0f}%",
+        f"  FDV/MCap:    ≤{cfg.MOMENTUM_FDV_RATIO_MAX:.1f}×",
+        "  Categories:  L1, L2, AI, DePIN, RWA, Gaming, DeFi",
+        "",
+        "<b>Stage 2 — 4H Macro Gate</b>",
+        f"  EMA stack:   EMA6 &gt; EMA12 &gt; EMA20 (sep ≥{cfg.MOMENTUM_TA_H4_EMA_SEP_MIN*100:.1f}%)",
+        f"  4H KDJ J:    warning at ≥{cfg.MOMENTUM_TA_H4_KDJ_J_MAX:.0f} (info only)",
+        "",
+        "<b>Stage 3 — Scoring</b>",
+        f"  STRONG ENTRY: ≥{cfg.MOMENTUM_TOTAL_STRONG_ENTRY}/100",
+        f"  WATCH:        ≥{cfg.MOMENTUM_TOTAL_WATCH}/100",
+        f"  MONITOR:      ≥{cfg.MOMENTUM_TOTAL_MONITOR}/100 (no alert)",
+        f"  Cooldown:     {cfg.MOMENTUM_ALERT_COOLDOWN_MIN // 60}H per coin",
+        "",
+        "<b>Golden Cross (⚡)</b>",
+        f"  1H range: {cfg.MOMENTUM_GC_1H_MIN:.1f}% – {cfg.MOMENTUM_GC_1H_MAX:.1f}%  |  RSI max: {cfg.MOMENTUM_GC_RSI_MAX:.0f}",
+        "",
+        "<b>Volume Spike (⚡)</b>",
+        f"  1H range: {cfg.MOMENTUM_VS_1H_MIN:.0f}% – {cfg.MOMENTUM_VS_1H_MAX:.0f}%",
+        f"  Vol mult: ≥{cfg.MOMENTUM_VS_VOL_MULT:.0f}× avg prev 3 candles  |  RSI max: {cfg.MOMENTUM_VS_RSI_MAX:.0f}",
+        "",
+        "<b>Recovery Bounce (♻️)</b>",
+        f"  1H range: {cfg.MOMENTUM_RB_1H_MIN:.0f}% – {cfg.MOMENTUM_RB_1H_MAX:.0f}%",
+        f"  24H peak: ≥{cfg.MOMENTUM_RB_PEAK_PCT:.0f}% above current  |  Pullback: ≥{cfg.MOMENTUM_RB_PULLBACK_PCT:.0f}%",
+        f"  4H KDJ J: &lt;{cfg.MOMENTUM_RB_KDJ_MAX:.0f}",
+    ])
+
+
+def build_explain_message(symbol: str, scan_history: list) -> str:
+    """/explain COIN — What happened to a specific coin in the last scan."""
+    symbol = symbol.upper()
+
+    if not scan_history:
+        return f"No scan history yet. Try again after the next scan."
+
+    _status_map = {
+        "ALERTED":         "✅ Alert sent",
+        "COOLDOWN":        "⏸ On cooldown (alerted recently, suppressed)",
+        "MONITOR":         "👁 Monitor (below alert threshold)",
+        "BELOW_THRESHOLD": "❌ Score too low",
+        "MACRO_BLOCKED":   "🚫 4H EMA stack bearish",
+        "DEAD_ZONE":       "💀 Dead zone (low vol + low gain)",
+        "NO_DATA":         "❓ No MEXC kline data",
+        "GC":              "⚡ Golden Cross alert sent",
+        "VS":              "⚡ Volume Spike alert sent",
+        "RB":              "♻️ Recovery alert sent",
+        "COOLING":         "⏳ 4H KDJ overheated (cooling alert sent)",
+    }
+
+    for snap in reversed(scan_history):
+        for oc in snap.outcomes:
+            if oc.symbol == symbol:
+                status = _status_map.get(oc.rec, oc.rec)
+                lines = [
+                    f"🔍 <b>EXPLAIN: {symbol}</b>",
+                    f"Last seen at: <b>{snap.timestamp}</b>",
+                    "",
+                    f"Status: <b>{status}</b>",
+                    f"1H change: <b>{oc.change_1h:+.2f}%</b>",
+                ]
+                if oc.score > 0:
+                    lines.append(f"Score: <b>{oc.score}/100</b>")
+                if oc.vol_pct > 0:
+                    lines.append(f"4H Vol: {oc.vol_pct:.0f}% of MA10")
+                if oc.h4_kdj_j > 0:
+                    lines.append(f"4H KDJ J: {oc.h4_kdj_j:.1f}")
+                lines += ["", f"Detail: <i>{oc.detail}</i>"]
+                return "\n".join(lines)
+
+    return (
+        f"<b>{symbol}</b> was not seen in the last 3 scans.\n\n"
+        "Possible reasons:\n"
+        "• Didn't pass 1H gain / MCap / vol / category filter\n"
+        "• No MEXC perpetual contract\n"
+        "• Above 10% 1H gain (parabolic, skipped)"
+    )
+
+
+def build_recovery_message(rb_watchlist: list) -> str:
+    """/recovery — Near-miss Recovery Bounce candidates from the last scan."""
+    if not rb_watchlist:
+        return (
+            "♻️ <b>RECOVERY WATCH</b>\n\n"
+            "No candidates in the last scan.\n\n"
+            "Candidates appear when a coin drops 12%+ from its 24H high\n"
+            "and starts bouncing (2-8% 1H gain)."
+        )
+
+    lines = ["♻️ <b>RECOVERY WATCH</b>", ""]
+    for item in sorted(rb_watchlist, key=lambda x: x.pullback_pct, reverse=True)[:5]:
+        ema_dot = "🟢" if item.h4_ema_ok else "🔴"
+        kdj_dot = "🟢" if item.h4_kdj_j < cfg.MOMENTUM_RB_KDJ_MAX else "🔴"
+        lines += [
+            f"<b>{item.symbol}</b> {item.change_1h:+.2f}% (1H)",
+            f"  24H peak: {_usd(item.h24_high)} → Now: {_usd(item.current)}",
+            f"  Pullback: <b>{item.pullback_pct:.1f}%</b>",
+            f"  {ema_dot} 4H EMA  {kdj_dot} KDJ {item.h4_kdj_j:.1f}",
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def build_summary_message(stats) -> str:
+    """/summary — Today's full stats (same as 08:01 daily summary)."""
+    return build_m5_daily_summary(stats)
+
+
+def build_help_message() -> str:
+    """/help — All available bot commands."""
+    return "\n".join([
+        "📖 <b>BOT COMMANDS</b>",
+        "",
+        "/status   — Last scan time, today's alert counts, next scan ETA",
+        "/coins    — Coins from the last 3 scans",
+        "/top      — Today's top 3 scored coins (compact)",
+        "/best     — Full alert for today's best coin",
+        "/filters  — All active filter thresholds",
+        "/explain COIN — What happened to a specific coin (e.g. /explain POLYX)",
+        "/recovery — Near-miss Recovery Bounce candidates",
+        "/summary  — Today's full stats summary",
+        "/help     — This message",
+        "",
+        "/test     — Send a test alert (delivery check)",
+        "/chatid   — Verify your chat ID configuration",
+    ])
 
 
 def send_scout_alert(coin, level: int) -> bool:

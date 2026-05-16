@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -47,6 +48,15 @@ class DailyStats:
     last_scan_ts:   str        = ""  # HH:MM Berlin time of most recent scan
     last_results:   list[str]  = field(default_factory=list)
     top_coins:      list       = field(default_factory=list)  # [(symbol, score, emoji), ...]
+    top_results:    list       = field(default_factory=list)  # up to 3 best MomentumResult objects
+
+
+@dataclass
+class ScanSnapshot:
+    """One complete scan cycle — stored in rolling 3-scan history for /coins and /explain."""
+    timestamp: str   # HH:MM Berlin time
+    results:   list  # list[MomentumResult]
+    outcomes:  list  # list[CandidateOutcome]
 
 
 class StatsTracker:
@@ -56,8 +66,9 @@ class StatsTracker:
     """
 
     def __init__(self) -> None:
-        self._lock  = threading.Lock()
-        self._stats = DailyStats()
+        self._lock         = threading.Lock()
+        self._stats        = DailyStats()
+        self._scan_history: deque = deque(maxlen=3)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -69,7 +80,7 @@ class StatsTracker:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def record_scan(self, results: list, m1m7_count: int, macro_blocked: int = 0) -> None:
+    def record_scan(self, results: list, m1m7_count: int, macro_blocked: int = 0, outcomes: list = None) -> None:
         """
         Call after every successful m5.scan().
         results       — list[MomentumResult] returned by scan()
@@ -136,16 +147,44 @@ class StatsTracker:
 
             s.last_results = snapshot
 
+            # Rolling scan history for /coins and /explain commands
+            snap = ScanSnapshot(
+                timestamp = now_str,
+                results   = list(results),
+                outcomes  = list(outcomes or []),
+            )
+            self._scan_history.append(snap)
+
+            # Today's top scored coins for /top and /best commands
+            _no_score_recs = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY"}
+            for r in results:
+                if r.recommendation not in _no_score_recs:
+                    s.top_results.append(r)
+            s.top_results.sort(key=lambda r: r.total_score, reverse=True)
+            s.top_results = s.top_results[:3]
+
     def reset(self) -> None:
         """Reset stats after the daily summary has been sent."""
         with self._lock:
             self._stats = DailyStats(date=datetime.now(tz=_BERLIN).date())
+            self._scan_history.clear()
 
     def get_daily_summary(self) -> DailyStats:
         """Return a snapshot of today's stats (safe copy — caller may read freely)."""
         with self._lock:
             self._ensure_today()
             return copy.deepcopy(self._stats)
+
+    def get_scan_history(self) -> list:
+        """Return up to last 3 ScanSnapshot objects (oldest first)."""
+        with self._lock:
+            return list(self._scan_history)
+
+    def get_top_results(self) -> list:
+        """Return today's top 3 MomentumResult objects by total_score."""
+        with self._lock:
+            self._ensure_today()
+            return list(self._stats.top_results)
 
     def get_status(self) -> str:
         """Build the plain-text body for the Telegram /status reply."""
