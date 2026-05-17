@@ -150,6 +150,68 @@ def _vol_human(vol: float) -> str:
     return f"${vol:,.0f}"
 
 
+def _fmt_price(price: float) -> str:
+    """Format price with MEXC-appropriate decimal precision (no mental math needed)."""
+    if price >= 0.10:
+        return f"{price:.4f}"
+    elif price >= 0.01:
+        return f"{price:.5f}"
+    else:
+        return f"{price:.6f}"
+
+
+def _signal_chain_lines(coin) -> list[str]:
+    """
+    Build the 4H/15m/5m signal chain block shown above the entry in all alerts.
+    Returns a list of HTML lines (empty list if tech data unavailable).
+    """
+    t = coin.tech
+    if t is None:
+        return []
+
+    def ck(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
+    # 4H line
+    macd_arrow = "↑" if t.h4_macd_ok else "↓"
+    h4_rsi_str = f"RSI {t.h4_rsi6:.0f}" if t.h4_rsi6 > 0 else f"KDJ {t.h4_kdj_j:.0f}"
+    h4_line = f"4H:  {ck(t.h4_ema_ok)} EMA bullish | {h4_rsi_str} | MACD {macd_arrow}"
+    if not t.h4_ema_ok:
+        h4_line = f"4H:  ❌ EMA bearish [{t.h4_ema6:.4g}/{t.h4_ema12:.4g}/{t.h4_ema20:.4g}]"
+
+    # 15m line
+    ema_ok_15m = t.m15_ema6_gt_ema12 if t.m15_ema6_gt_ema12 is not None else t.m15_ema_ok
+    if ema_ok_15m and t.m15_rsi6 <= 72:
+        m15_line = f"15m: {ck(ema_ok_15m)} EMA bullish | RSI {t.m15_rsi6:.0f} | Vol {t.vol_pct:.0f}% MA10"
+    else:
+        concern = ""
+        if not ema_ok_15m:
+            concern = f" EMA6 < EMA12"
+        if t.m15_rsi6 > 72:
+            concern += f" RSI {t.m15_rsi6:.0f} — überhitzt"
+        m15_line = f"15m: {ck(ema_ok_15m)} {concern.strip() if concern else 'EMA bullish'} | RSI {t.m15_rsi6:.0f}"
+
+    # 5m line
+    if t.m5_rsi6 > 0:
+        kdj_arrow = "↑" if t.m5_kdj_rising else "↓"
+        px_sym    = "&gt;" if t.m5_price_above_ema20 else "&lt;"
+        m5_overall_ok = t.m5_ok
+        m5_line = (f"5m:  {ck(m5_overall_ok)} KDJ J: {t.m5_kdj_j:.0f}{kdj_arrow}"
+                   f" | RSI {t.m5_rsi6:.0f} | Price {px_sym} EMA20")
+        if not m5_overall_ok and t.m5_note:
+            m5_line += f" ← {t.m5_note.split(' — ')[0].replace('⏳ ', '').replace('⚠️ ', '')}"
+    else:
+        m5_line = "5m:  ⚫ n/v"
+
+    # Entry zone
+    ep    = coin.entry_price
+    ez_lo = ep * (1 - cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
+    ez_hi = ep * (1 + cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
+    zone_line = f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
+
+    return ["", h4_line, m15_line, m5_line, zone_line, ""]
+
+
 def _fg_bar(score: int, blocks: int = 10) -> str:
     """
     Build a simple visual bar for the Fear & Greed score.
@@ -963,16 +1025,18 @@ def build_momentum_alert(coin) -> str:
         f"MCap: {_vol_human(coin.market_cap)} | Circ: {coin.circ_supply_pct:.0f}% | FDV/MCap: {coin.fdv_mcap_ratio:.1f}x",
         "",
         f"🎯 <b>TOTAL SCORE: {coin.total_score}/100</b>",
-        "",
+    ]
+    lines += _signal_chain_lines(coin)
+    lines += [
         "📋 <b>ACTION:</b>",
         "",
-        f"Entry: <b>{_usd(coin.entry_price)}</b>",
+        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
         "",
-        f"SL (-{coin.sl_pct:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
+        f"SL (-{coin.sl_pct:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
         "",
-        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
+        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
         "",
-        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
     ]
 
@@ -985,9 +1049,12 @@ def build_momentum_alert(coin) -> str:
         f"R/R: {coin.rr_str}",
     ]
 
-    if coin.warnings:
+    all_warnings = list(coin.warnings)
+    if coin.m5_note and coin.m5_note not in all_warnings:
+        all_warnings.append(coin.m5_note)
+    if all_warnings:
         lines += ["", "⚠️ <b>RISKS:</b>"]
-        for w in coin.warnings:
+        for w in all_warnings:
             lines.append(f"⚠️ {w}")
 
     mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
@@ -1129,11 +1196,13 @@ def build_volume_spike_alert(coin) -> str:
         f"⚡ <b>VOLUME SPIKE: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         f"Volume <b>{ratio}×</b> normal — move may be starting.",
         "Watch for entry. Not confirmed yet.",
-        "",
-        f"Entry: <b>{_usd(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_VS_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+    ]
+    lines += _signal_chain_lines(coin)
+    lines += [
+        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_VS_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
         f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
         f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
@@ -1174,11 +1243,13 @@ def build_recovery_alert(coin) -> str:
         f"♻️ <b>RECOVERY: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         f"Post-pump bounce — previous 24H peak: <b>{prev_peak}</b>",
         f"Pulled back <b>{pullback_pct:.1f}%</b> — now recovering.",
-        "",
-        f"Entry: <b>{_usd(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_RB_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_RB_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_RB_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+    ]
+    lines += _signal_chain_lines(coin)
+    lines += [
+        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_RB_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_RB_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_RB_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
         f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
         f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
@@ -1220,11 +1291,13 @@ def build_golden_cross_alert(coin) -> str:
         f"⚡ <b>GOLDEN CROSS: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         "EMA6 just crossed above EMA20 on 15m.",
         "Very early signal — move just starting.",
-        "",
-        f"Entry: <b>{_usd(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_GC_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+    ]
+    lines += _signal_chain_lines(coin)
+    lines += [
+        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_GC_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
         f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
         f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
@@ -1258,11 +1331,13 @@ def build_pbw_alert(coin) -> str:
         f"🔍 <b>PRE-BREAKOUT: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         f"RSI&lt;45 seit {coin.m1_rsi_streak} Kerzen | EMAs komprimiert ({coin.m1_ema_spread:.3f}%)",
         f"Erste Volumen-Kerze bestätigt ({coin.m1_vol_ratio:.1f}×).",
-        "",
-        f"Entry: <b>{_usd(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_PBW_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_PBW_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_PBW_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+    ]
+    lines += _signal_chain_lines(coin)
+    lines += [
+        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_PBW_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_PBW_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_PBW_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
         f"ATH-Dist: -{coin.ath_dist_pct:.0f}% 📊 | Score: {score_str}/100",
         f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
@@ -1298,11 +1373,13 @@ def build_staircase_alert(coin) -> str:
         f"4H Trend intakt | 15m Vol: {vol_pct} von MA10",
         f"RSI abgekühlt: {rsi_val} | KDJ J: {kdj_val}",
         f"Vorheriger Leg: +{coin.sc_prior_move:.1f}% ✅",
-        "",
-        f"Entry: <b>{_usd(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_SC_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_SC_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_SC_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+    ]
+    lines += _signal_chain_lines(coin)
+    lines += [
+        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_SC_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_SC_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_SC_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
         f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {score_str}/100",
         f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",

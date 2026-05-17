@@ -139,8 +139,8 @@ LOG_FILE  = "logs/crypto_ecosystem.log"
 MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com"  # Futures/perp API (no key needed)
 
 # 1h momentum gate
-MOMENTUM_ZONE_MIN            = 2.0    # minimum 1h gain % to qualify — M1 filter  (was 3.0)
-MOMENTUM_ZONE_MAX            = 10.0   # maximum 1h gain % — avoid parabolic pumps  (was 12.0)
+MOMENTUM_ZONE_MIN            = 1.5    # minimum 1h gain % to qualify — M1 filter  (was 2.0)
+MOMENTUM_ZONE_MAX            = 12.0   # maximum 1h gain % — fast pumps hit GC at 10-12%  (was 10.0)
 MOMENTUM_EARLY_EXIT_PCT      = -2.0   # CMC loop break — extended for Staircase signal (was 0.5)
 
 # Market-cap & liquidity filters
@@ -228,6 +228,27 @@ MOMENTUM_WARN_FDV_HIGH_RATIO   = 3.0    # FDV/MCap above this  → "High dilutio
 # Kline fetch limits
 MOMENTUM_TA_4H_LIMIT      = 100    # 4H candles (covers EMA20 + KDJ + MACD warm-up)
 MOMENTUM_TA_15M_LIMIT     = 60     # 15m candles (≈ 15 hours of data)
+MOMENTUM_TA_5M_LIMIT          = 60     # 60 × 5m = 5 hours of data for precision layer
+
+# ─── 5m precision layer thresholds ──────────────────────────────────────────
+MOMENTUM_5M_RSI_HOT           = 80.0   # 5m RSI above → overheated (soft gate, downgrade STRONG→WATCH)
+MOMENTUM_5M_KDJ_MAX_PBW       = 30.0   # PBW: 5m KDJ J < 30 during accumulation
+MOMENTUM_5M_RSI_MAX_PBW       = 45.0   # PBW: 5m RSI6 < 45 confirmed
+MOMENTUM_5M_VOL_MAX_SC        = 0.25   # SC: 5m vol < 25% of MA10
+MOMENTUM_5M_KDJ_MAX_SC        = 35.0   # SC: 5m KDJ J < 35
+
+# ─── Per-signal cooldowns (CHANGE B) ──────────────────────────────────────────
+MOMENTUM_RB_COOLDOWN_MIN      = 180    # Recovery Bounce: 3h (was 2h — avoid chasing noise)
+MOMENTUM_PBW_COOLDOWN_MIN     = 60     # Pre-Breakout Watch: 1h (was 2h — accumulation needs fast re-check)
+MOMENTUM_SC_COOLDOWN_MIN      = 60     # Staircase: 1h (was 2h — leg pauses are short)
+
+# ─── New-signal min scores (CHANGE D) ─────────────────────────────────────────
+MOMENTUM_PBW_MIN_SCORE        = 60     # PBW fires if fund quality ≥ this
+MOMENTUM_SC_MIN_SCORE         = 60     # SC fires if fund quality ≥ this
+
+# ─── Entry precision (ADDITION 2) ──────────────────────────────────────────────
+MOMENTUM_ENTRY_LIMIT_OFFSET   = 0.001  # entry = last_price × (1 + 0.1%) — direct MEXC limit
+MOMENTUM_ENTRY_ZONE_PCT       = 0.3    # signal chain: Entry-Zone ± 0.3%
 
 # ─── Golden Cross signal ──────────────────────────────────────────────────────
 MOMENTUM_GC_1H_MIN      = 0.5    # minimum 1H gain for GC candidates

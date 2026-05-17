@@ -157,6 +157,25 @@ class TechResult:
     # Technical score (0-60)
     score: int
 
+    # 4H additional indicators (for signal chain display)
+    h4_rsi6:             float = 0.0    # RSI6 on 4H
+    h4_macd_ok:          bool  = False  # 4H MACD DIF > DEA
+
+    # 15m EMA12 — for GATE 2a hard gate
+    m15_ema12:           float = 0.0
+    m15_ema6_gt_ema12:   bool  = False
+
+    # 5m Precision Layer (soft gate — populated after _check_5m())
+    m5_rsi6:              float = 0.0
+    m5_kdj_j:             float = 0.0
+    m5_kdj_rising:        bool  = False
+    m5_price_above_ema20: bool  = False
+    m5_ema6_gt_ema12:     bool  = False
+    m5_first_green:       bool  = False
+    m5_vol_pct:           float = 0.0
+    m5_ok:                bool  = False
+    m5_note:              str   = ""
+
 
 @dataclass
 class FundResult:
@@ -218,6 +237,11 @@ class MomentumResult:
     m1_vol_ratio:     float = 0.0    # 1m trigger vol / MA10 ratio (PBW)
     sc_prior_move:    float = 0.0    # 24H price range % (Staircase prior leg)
     ath_dist_pct:     float = 0.0    # % below 16D peak (direct field for PBW/SC without tech)
+
+    # 5m layer data and advisory note (for signal chain display in alerts)
+    m5_rsi6:   float = 0.0
+    m5_kdj_j:  float = 0.0
+    m5_note:   str   = ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -320,7 +344,7 @@ _rb_alerted: dict[str, float] = {}
 
 
 def _on_rb_cooldown(symbol: str) -> bool:
-    return (time.time() - _rb_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+    return (time.time() - _rb_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_RB_COOLDOWN_MIN * 60
 
 
 def _mark_rb_alerted(symbol: str) -> None:
@@ -334,7 +358,7 @@ _pbw_alerted: dict[str, float] = {}
 
 
 def _on_pbw_cooldown(symbol: str) -> bool:
-    return (time.time() - _pbw_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+    return (time.time() - _pbw_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_PBW_COOLDOWN_MIN * 60
 
 
 def _mark_pbw_alerted(symbol: str) -> None:
@@ -348,7 +372,7 @@ _sc_alerted: dict[str, float] = {}
 
 
 def _on_sc_cooldown(symbol: str) -> bool:
-    return (time.time() - _sc_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+    return (time.time() - _sc_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_SC_COOLDOWN_MIN * 60
 
 
 def _mark_sc_alerted(symbol: str) -> None:
@@ -429,6 +453,10 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     h4_ema_ok  = (h4_ema6 > h4_ema12 > h4_ema20 and
                   h4_ema_sep >= cfg.MOMENTUM_TA_H4_EMA_SEP_MIN)
 
+    h4_rsi6    = float(compute_rsi(close_4h, period=6).iloc[-1])
+    h4_dif, h4_dea, _ = compute_macd(close_4h)
+    h4_macd_ok = float(h4_dif.iloc[-1]) > float(h4_dea.iloc[-1])
+
     _, _, j4h = compute_kdj(df_4h)
     h4_kdj_j  = float(j4h.iloc[-1])
     h4_kdj_ok = h4_kdj_j < cfg.MOMENTUM_TA_H4_KDJ_J_MAX   # informational only — no longer a hard gate
@@ -452,6 +480,11 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     m15_ema20 = float(ema20_15m.iloc[-1])
     m15_ema_ok  = m15_ema6 > m15_ema20
     m15_ema_pts = _PTS_EMA if m15_ema_ok else 0
+
+    # 15m EMA12 — for GATE 2a confirmation
+    ema12_15m           = compute_ema(close_15m, 12)
+    m15_ema12           = float(ema12_15m.iloc[-1])
+    m15_ema6_gt_ema12   = m15_ema6 > m15_ema12
 
     # Golden cross: EMA6 was below EMA20 two candles ago, now above (fresh cross)
     m15_golden_cross = (
@@ -528,6 +561,10 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         h16d_high=round(h16d_high, 8),
         ath_dist_pct=round(ath_dist_pct, 1),
         score=score,
+        h4_rsi6=round(h4_rsi6, 2),
+        h4_macd_ok=h4_macd_ok,
+        m15_ema12=round(m15_ema12, 8),
+        m15_ema6_gt_ema12=m15_ema6_gt_ema12,
     )
 
 
@@ -641,6 +678,83 @@ def _check_1m_pbw(mexc_symbol: str) -> "dict | None":
     }
 
 
+def _check_5m(mexc_symbol: str) -> "dict | None":
+    """
+    Fetch 5m candles and compute precision-layer indicators.
+    Returns a plain dict (soft gate data only — never used to block alerts).
+    """
+    df_5m = get_mexc_futures_klines(mexc_symbol, "5m", limit=cfg.MOMENTUM_TA_5M_LIMIT)
+    if df_5m is None or len(df_5m) < 20:
+        return None
+
+    close_5m = df_5m["close"]
+    ema6_s   = compute_ema(close_5m,  6)
+    ema12_s  = compute_ema(close_5m, 12)
+    ema20_s  = compute_ema(close_5m, 20)
+    m5_ema6  = float(ema6_s.iloc[-1])
+    m5_ema12 = float(ema12_s.iloc[-1])
+    m5_ema20 = float(ema20_s.iloc[-1])
+
+    rsi_s   = compute_rsi(close_5m, period=6)
+    m5_rsi6 = float(rsi_s.iloc[-1])
+
+    _, _, j_s = compute_kdj(df_5m)
+    m5_kdj_j     = float(j_s.iloc[-1])
+    m5_kdj_prev  = float(j_s.iloc[-2]) if len(j_s) >= 2 else m5_kdj_j
+    m5_kdj_rising = m5_kdj_j > m5_kdj_prev
+
+    m5_price     = float(close_5m.iloc[-1])
+    m5_open_last = float(df_5m["open"].iloc[-1])
+
+    vol_s    = df_5m["volume"]
+    vol_last = float(vol_s.iloc[-1])
+    vol_ma10 = float(vol_s.rolling(10).mean().iloc[-1])
+    m5_vol_pct = (vol_last / vol_ma10 * 100.0) if vol_ma10 > 0 else 0.0
+
+    return {
+        "rsi6":               round(m5_rsi6, 2),
+        "kdj_j":              round(m5_kdj_j, 2),
+        "kdj_rising":         m5_kdj_rising,
+        "price_above_ema20":  m5_price > m5_ema20,
+        "ema6_gt_ema12":      m5_ema6 > m5_ema12,
+        "first_green":        m5_price > m5_open_last,
+        "vol_pct":            round(m5_vol_pct, 1),
+    }
+
+
+def _price_decimals(price: float) -> int:
+    """Return decimal places for MEXC-ready price display."""
+    if price >= 0.10:
+        return 4
+    elif price >= 0.01:
+        return 5
+    else:
+        return 6
+
+
+def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
+    """Populate TechResult 5m fields from _check_5m() result (mutates in place)."""
+    if m5 is None:
+        return
+    tech.m5_rsi6              = m5["rsi6"]
+    tech.m5_kdj_j             = m5["kdj_j"]
+    tech.m5_kdj_rising        = m5["kdj_rising"]
+    tech.m5_price_above_ema20 = m5["price_above_ema20"]
+    tech.m5_ema6_gt_ema12     = m5["ema6_gt_ema12"]
+    tech.m5_first_green       = m5["first_green"]
+    tech.m5_vol_pct           = m5["vol_pct"]
+    # Evaluate 5m overall health
+    if m5["rsi6"] > cfg.MOMENTUM_5M_RSI_HOT:
+        tech.m5_ok   = False
+        tech.m5_note = f"⏳ 5m überhitzt (RSI {m5['rsi6']:.0f}) — auf Pullback warten"
+    elif not m5["price_above_ema20"]:
+        tech.m5_ok   = False
+        tech.m5_note = "⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position"
+    else:
+        tech.m5_ok   = True
+        tech.m5_note = ""
+
+
 def scan() -> list[MomentumResult]:
     """
     Run one full momentum scan.
@@ -723,7 +837,7 @@ def scan() -> list[MomentumResult]:
         _inf_supply_map[symbol] = has_inf_supply
 
         # Pipeline assignment (before vol_change_24h filter — SC skips it)
-        in_main = change_1h >= cfg.MOMENTUM_ZONE_MIN                                     # 2-10%
+        in_main = cfg.MOMENTUM_ZONE_MIN <= change_1h <= cfg.MOMENTUM_ZONE_MAX          # 1.5-12%
         in_gc   = cfg.MOMENTUM_GC_1H_MIN <= change_1h <= cfg.MOMENTUM_GC_1H_MAX          # 0.5-8%
         in_vs   = cfg.MOMENTUM_VS_1H_MIN <= change_1h <= cfg.MOMENTUM_VS_1H_MAX          # 1-8%
         in_rb   = (cfg.MOMENTUM_RB_1H_MIN <= change_1h <= cfg.MOMENTUM_RB_1H_MAX         # 2-8%
@@ -814,6 +928,13 @@ def scan() -> list[MomentumResult]:
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "MACRO_BLOCKED", "4H EMA bearish", tech.vol_pct, tech.h4_kdj_j))
             continue
 
+        # GATE 2a: 15m EMA6 > EMA12 (new hard gate)
+        if not tech.m15_ema6_gt_ema12:
+            macro_blocked_count += 1
+            log.info(f"  15m EMA ✗  {symbol}: EMA6 {tech.m15_ema6:.4g} < EMA12 {tech.m15_ema12:.4g}")
+            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "MACRO_BLOCKED", "15m EMA6 < EMA12", tech.vol_pct, tech.h4_kdj_j))
+            continue
+
         # FIX 4: dead-zone blocker — very low volume AND low momentum = skip
         if (tech.vol_pct < cfg.MOMENTUM_DEAD_VOL_PCT * 100 and
                 change_1h < cfg.MOMENTUM_DEAD_1H_MAX):
@@ -823,6 +944,9 @@ def scan() -> list[MomentumResult]:
             )
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "DEAD_ZONE", f"Vol {tech.vol_pct:.0f}% of MA10 + only {change_1h:.1f}% 1H", tech.vol_pct, tech.h4_kdj_j))
             continue
+
+        # 5m soft gate — fetch and populate tech.m5_* (never blocks)
+        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
 
         # Fundamental bonus
         fund = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
@@ -864,6 +988,11 @@ def scan() -> list[MomentumResult]:
                 log.debug(f"  SKIP     {symbol}: {total}/100 < {cfg.MOMENTUM_TOTAL_MONITOR}")
                 _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, total, "BELOW_THRESHOLD", f"Score {total}/100 — too low", tech.vol_pct, tech.h4_kdj_j))
                 continue
+
+        # 5m soft gate: downgrade STRONG → WATCH if overheated
+        if recommendation == "STRONG ENTRY" and tech.m5_note.startswith("⏳"):
+            recommendation = "WATCH"
+            rec_emoji      = "🟡"
 
         # SL parameters — tighter for EARLY SIGNAL (−4% vs standard −6%)
         if recommendation == "EARLY SIGNAL":
@@ -912,10 +1041,10 @@ def scan() -> list[MomentumResult]:
             rec_emoji       = rec_emoji,
             warnings        = warnings,
             ath_pts         = ath_pts,
-            entry_price     = round(price, 8),
-            stop_loss       = round(price * coin_sl_factor, 8),
-            tp1             = round(price * _tp1_factor, 8),
-            tp2             = round(price * _tp2_factor, 8),
+            entry_price     = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss       = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SL_PCT / 100), _price_decimals(price)),
+            tp1             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), _price_decimals(price)),
+            tp2             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), _price_decimals(price)),
             risk_usd        = coin_risk_usd,
             reward_tp1_usd  = _rwd_tp1,
             reward_tp2_usd  = _rwd_tp2,
@@ -923,6 +1052,7 @@ def scan() -> list[MomentumResult]:
             sl_pct          = coin_sl_pct,
             infinite_supply = _inf_supply_map.get(symbol, False),
             ath_dist_pct    = round(tech.ath_dist_pct, 1),
+            m5_note         = tech.m5_note,
         ))
 
     # Sort best-first
@@ -982,6 +1112,15 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  GC skip {symbol}: vol {tech.vol_pct:.0f}% < {gc_vol_threshold*100:.0f}%")
             continue
 
+        # 5m soft gate for GC
+        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        gc_5m_warn = []
+        if tech.m5_rsi6 > 0:
+            if not (40 <= tech.m5_rsi6 <= 72):
+                gc_5m_warn.append(f"⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+            if not tech.m5_price_above_ema20:
+                gc_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+
         log.info(
             f"  ⚡ GOLDEN CROSS  {symbol}  1h {change_1h:+.2f}%  "
             f"RSI {tech.m15_rsi6:.1f}  Vol {tech.vol_pct:.0f}%"
@@ -1009,10 +1148,12 @@ def scan() -> list[MomentumResult]:
             tech            = tech,
             recommendation  = "GOLDEN CROSS",
             rec_emoji       = "⚡",
-            entry_price     = round(price, 8),
-            stop_loss       = round(price * gc_sl_factor, 8),
-            tp1             = round(price * _tp1_factor, 8),
-            tp2             = round(price * _tp2_factor, 8),
+            warnings        = gc_5m_warn,
+            m5_note         = tech.m5_note,
+            entry_price     = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss       = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_GC_SL_PCT / 100), _price_decimals(price)),
+            tp1             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), _price_decimals(price)),
+            tp2             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), _price_decimals(price)),
             risk_usd        = gc_risk_usd,
             reward_tp1_usd  = _rwd_tp1,
             reward_tp2_usd  = _rwd_tp2,
@@ -1047,6 +1188,15 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  VS skip {symbol}: RSI {tech.m15_rsi6:.1f} ≥ {cfg.MOMENTUM_VS_RSI_MAX}")
             continue
 
+        # 5m soft gate for VS
+        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        vs_5m_warn = []
+        if tech.m5_rsi6 > 0:
+            if not tech.m5_kdj_rising:
+                vs_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+            if tech.m5_rsi6 >= 75:
+                vs_5m_warn.append(f"⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+
         log.info(
             f"  ⚡ VOL SPIKE  {symbol}  1h {change_1h:+.2f}%  "
             f"vol {tech.m15_vol_spike_ratio:.1f}×  RSI {tech.m15_rsi6:.1f}"
@@ -1073,10 +1223,12 @@ def scan() -> list[MomentumResult]:
             tech            = tech,
             recommendation  = "VOLUME SPIKE",
             rec_emoji       = "⚡",
-            entry_price     = round(price, 8),
-            stop_loss       = round(price * vs_sl_factor, 8),
-            tp1             = round(price * _tp1_factor, 8),
-            tp2             = round(price * _tp2_factor, 8),
+            warnings        = vs_5m_warn,
+            m5_note         = tech.m5_note,
+            entry_price     = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss       = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_VS_SL_PCT / 100), _price_decimals(price)),
+            tp1             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), _price_decimals(price)),
+            tp2             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), _price_decimals(price)),
             risk_usd        = vs_risk_usd,
             reward_tp1_usd  = _rwd_tp1,
             reward_tp2_usd  = _rwd_tp2,
@@ -1137,6 +1289,14 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  RB skip {symbol}: 4H KDJ {tech.h4_kdj_j:.1f} ≥ {cfg.MOMENTUM_RB_KDJ_MAX} (not cooled)")
             continue
 
+        # 5m soft gate for RB + 15m EMA6>EMA12 check
+        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        rb_5m_warn = []
+        if not tech.m15_ema6_gt_ema12:
+            rb_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+        if tech.m5_rsi6 > 0 and not tech.m5_first_green:
+            rb_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+
         pullback_shown = (h24_high - current) / h24_high * 100
         log.info(
             f"  ♻️ RECOVERY  {symbol}  1h {change_1h:+.2f}%  "
@@ -1168,10 +1328,12 @@ def scan() -> list[MomentumResult]:
             tech            = tech,
             recommendation  = "RECOVERY",
             rec_emoji       = "♻️",
-            entry_price     = round(price, 8),
-            stop_loss       = round(price * rb_sl_factor, 8),
-            tp1             = round(price * rb_tp1_factor, 8),
-            tp2             = round(price * rb_tp2_factor, 8),
+            warnings        = rb_5m_warn,
+            m5_note         = tech.m5_note,
+            entry_price     = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss       = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_RB_SL_PCT / 100), _price_decimals(price)),
+            tp1             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_RB_TP1_PCT / 100), _price_decimals(price)),
+            tp2             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_RB_TP2_PCT / 100), _price_decimals(price)),
             risk_usd        = rb_risk_usd,
             reward_tp1_usd  = rb_rwd_tp1,
             reward_tp2_usd  = rb_rwd_tp2,
@@ -1231,6 +1393,14 @@ def scan() -> list[MomentumResult]:
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
             warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
 
+        # 5m soft gate for PBW
+        m5_pbw = _check_5m(mexc_symbol)
+        pbw_m5_note = ""
+        if m5_pbw is not None:
+            if m5_pbw["kdj_j"] >= cfg.MOMENTUM_5M_KDJ_MAX_PBW or m5_pbw["rsi6"] >= cfg.MOMENTUM_5M_RSI_MAX_PBW:
+                pbw_m5_note = "⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position"
+                warnings.append(pbw_m5_note)
+
         log.info(
             f"  🔍 PRE-BREAKOUT  {symbol}  1h {change_1h:+.2f}%  "
             f"EMA {pbw['ema_spread']:.3f}%  RSI streak {pbw['rsi_streak']}  "
@@ -1255,10 +1425,11 @@ def scan() -> list[MomentumResult]:
             fund=fund, total_score=fund.total,
             recommendation="PRE-BREAKOUT", rec_emoji="🔍",
             warnings=warnings, ath_pts=0,
-            entry_price=round(price, 8),
-            stop_loss=round(price * sl_f,  8),
-            tp1=round(price * tp1_f, 8),
-            tp2=round(price * tp2_f, 8),
+            m5_note=pbw_m5_note,
+            entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_PBW_SL_PCT / 100), _price_decimals(price)),
+            tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_PBW_TP1_PCT / 100), _price_decimals(price)),
+            tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_PBW_TP2_PCT / 100), _price_decimals(price)),
             risk_usd=risk, reward_tp1_usd=rwd1, reward_tp2_usd=rwd2,
             rr_str=f"1:{rwd1/risk:.2f}", sl_pct=cfg.MOMENTUM_PBW_SL_PCT,
             infinite_supply=has_inf,
@@ -1318,6 +1489,14 @@ def scan() -> list[MomentumResult]:
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
             warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
 
+        # 5m soft gate for SC
+        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        if tech.m5_rsi6 > 0:
+            if tech.m5_vol_pct >= cfg.MOMENTUM_5M_VOL_MAX_SC * 100:
+                warnings.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+            if tech.m5_kdj_j >= cfg.MOMENTUM_5M_KDJ_MAX_SC:
+                warnings.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+
         log.info(
             f"  🪜 STAIRCASE  {symbol}  1h {change_1h:+.2f}%  "
             f"Vol {tech.vol_pct:.0f}%  RSI {tech.m15_rsi6:.1f}  KDJ {tech.m15_kdj_j:.1f}  "
@@ -1342,10 +1521,11 @@ def scan() -> list[MomentumResult]:
             tech=tech, fund=fund, total_score=fund.total,
             recommendation="STAIRCASE", rec_emoji="🪜",
             warnings=warnings, ath_pts=0,
-            entry_price=round(price, 8),
-            stop_loss=round(price * sl_f,  8),
-            tp1=round(price * tp1_f, 8),
-            tp2=round(price * tp2_f, 8),
+            m5_note=tech.m5_note,
+            entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SC_SL_PCT / 100), _price_decimals(price)),
+            tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_SC_TP1_PCT / 100), _price_decimals(price)),
+            tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_SC_TP2_PCT / 100), _price_decimals(price)),
             risk_usd=risk, reward_tp1_usd=rwd1, reward_tp2_usd=rwd2,
             rr_str=f"1:{rwd1/risk:.2f}", sl_pct=cfg.MOMENTUM_SC_SL_PCT,
             infinite_supply=has_inf,
