@@ -141,7 +141,7 @@ MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com"  # Futures/perp API (no key
 # 1h momentum gate
 MOMENTUM_ZONE_MIN            = 2.0    # minimum 1h gain % to qualify — M1 filter  (was 3.0)
 MOMENTUM_ZONE_MAX            = 10.0   # maximum 1h gain % — avoid parabolic pumps  (was 12.0)
-MOMENTUM_EARLY_EXIT_PCT      = 0.5    # CMC loop break — below GC minimum (was 1.5)
+MOMENTUM_EARLY_EXIT_PCT      = -2.0   # CMC loop break — extended for Staircase signal (was 0.5)
 
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M minimum market cap
@@ -209,9 +209,9 @@ MOMENTUM_EARLY_SL_PCT          = 4.0    # SL for EARLY SIGNAL — tighter than n
 MOMENTUM_EARLY_15M_MIN         = 0.8    # min 15m candle gain % to qualify as early mover (was 1.0)
 MOMENTUM_EARLY_15M_MAX         = 3.5    # max 15m candle gain % (above = too extended)
 MOMENTUM_EARLY_1H_MAX          = 5.0    # 1H must still be below this for EARLY classification
-MOMENTUM_SL_PCT                = 6.0    # SL  = entry × (1 − 6%)
-MOMENTUM_TP1_PCT               = 10.0   # TP1 = entry × (1 + 10%)
-MOMENTUM_TP2_PCT               = 20.0   # TP2 = entry × (1 + 20%)
+MOMENTUM_SL_PCT                = 5.0    # SL  = entry × (1 − 5%)  unified for all signals
+MOMENTUM_TP1_PCT               = 8.0    # TP1 = entry × (1 + 8%)  unified
+MOMENTUM_TP2_PCT               = 15.0   # TP2 = entry × (1 + 15%) unified
 MOMENTUM_POSITION_USD          = 100.0  # notional position size for R/R display ($)
 #
 # Max Telegram alerts dispatched per scan cycle (best score first)
@@ -245,7 +245,7 @@ MOMENTUM_VOL_GC_WARN   = 0.40   # below this at cross → "low volume" warning i
 
 # ─── Volume Spike signal (FIX 2) ─────────────────────────────────────────────
 MOMENTUM_VS_1H_MIN   = 1.0    # min 1H gain to be a VS candidate
-MOMENTUM_VS_1H_MAX   = 6.0    # max 1H gain for VS (keeps it pre-breakout)
+MOMENTUM_VS_1H_MAX   = 8.0    # max 1H gain for VS (keeps it pre-breakout)
 MOMENTUM_VS_VOL_MULT = 3.0    # current 15m vol must be ≥ 3× avg of prior 3 candles
 MOMENTUM_VS_RSI_MAX  = 75.0   # 15m RSI ceiling for VS alerts
 MOMENTUM_VS_SL_PCT   = 5.0    # SL % for Volume Spike alerts
@@ -255,7 +255,7 @@ MOMENTUM_RB_1H_MIN       = 2.0    # min 1H gain (coin is actively bouncing)
 MOMENTUM_RB_1H_MAX       = 8.0    # max 1H gain (not yet overextended)
 MOMENTUM_RB_PEAK_PCT     = 12.0   # h24_high must be ≥ 12% above current price or low
 MOMENTUM_RB_PULLBACK_PCT = 8.0    # coin must be ≥ 8% below h24_high (real pullback happened)
-MOMENTUM_RB_KDJ_MAX      = 85.0   # 4H KDJ must be < 85 (cooled after the pump)
+MOMENTUM_RB_KDJ_MAX      = 110.0  # 4H KDJ must be < 110 (cooled after the pump)
 MOMENTUM_RB_TP1_PCT      = 8.0    # conservative TP1 (below old peak)
 MOMENTUM_RB_TP2_PCT      = 15.0   # optimistic TP2 (still below old peak for most cases)
 MOMENTUM_RB_SL_PCT       = 5.0    # tight SL — old peak is overhead resistance
@@ -267,6 +267,35 @@ MOMENTUM_ATH_DIST_L1     = 80.0   # > 80% below 16D peak → +3 pts
 MOMENTUM_ATH_DIST_L2     = 90.0   # > 90% below 16D peak → +5 pts
 MOMENTUM_ATH_DIST_L1_PTS = 3
 MOMENTUM_ATH_DIST_L2_PTS = 5
+
+# ─── Pre-Breakout Watch signal (FIX 5) ───────────────────────────────────────
+MOMENTUM_PBW_1H_MIN         = 1.0    # min 1H gain for PBW candidates
+MOMENTUM_PBW_1H_MAX         = 8.0    # max 1H gain for PBW candidates
+MOMENTUM_PBW_EMA_SPREAD_MAX = 0.1    # 1m EMA6/EMA20 spread must be < 0.1% (compression)
+MOMENTUM_PBW_RSI_MAX        = 45.0   # 1m RSI6 must be < 45
+MOMENTUM_PBW_RSI_CANDLES    = 8      # consecutive candles with RSI < threshold
+MOMENTUM_PBW_VOL_MULT       = 1.5    # trigger: 1m vol > 1.5× MA10
+MOMENTUM_PBW_SL_PCT         = 5.0
+MOMENTUM_PBW_TP1_PCT        = 8.0
+MOMENTUM_PBW_TP2_PCT        = 15.0
+
+# ─── Staircase Continuation signal (FIX 7) ───────────────────────────────────
+MOMENTUM_SC_1H_MIN          = -2.0   # min 1H gain (flat/slight dip = consolidation)
+MOMENTUM_SC_1H_MAX          = 4.0    # max 1H gain
+MOMENTUM_SC_VOL_MAX         = 0.20   # 15m vol must be < 20% of MA10 (very low)
+MOMENTUM_SC_RSI_MAX         = 45.0   # 15m RSI6 must be < 45 (cooled)
+MOMENTUM_SC_KDJ_MAX         = 40.0   # 15m KDJ J must be < 40 (fully reset)
+MOMENTUM_SC_PRIOR_MOVE_MIN  = 8.0    # 24H high must be ≥8% above current (prior leg)
+MOMENTUM_SC_SL_PCT          = 5.0
+MOMENTUM_SC_TP1_PCT         = 8.0
+MOMENTUM_SC_TP2_PCT         = 15.0
+
+# ─── Alert logging (FIX 6) ───────────────────────────────────────────────────
+ALERT_LOG_CSV = "logs/alert_log.csv"
+
+# ─── Unified warning thresholds ──────────────────────────────────────────────
+MOMENTUM_WARN_CIRC_ALERT_PCT  = 60.0   # circ rate warning if below this
+MOMENTUM_WARN_FDV_ALERT_RATIO = 2.5    # FDV/MCap warning if above this
 
 # CMC tag slugs for allowed categories (used for set membership check)
 MOMENTUM_ALLOWED_TAGS = frozenset({
@@ -292,4 +321,6 @@ MOMENTUM_ALLOWED_TAGS = frozenset({
     "defi",
     # Modular
     "modular-blockchain",
+    "fan-token",
+    "privacy",
 })

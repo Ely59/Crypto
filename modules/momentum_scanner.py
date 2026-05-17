@@ -211,6 +211,14 @@ class MomentumResult:
     rr_str:         str   = "1:1.67"   # reward_tp1 / risk
     sl_pct:         float = 6.0        # actual SL % applied (4.0 for EARLY SIGNAL)
 
+    # Supplementary fields for new signal types
+    infinite_supply:  bool  = False  # True when max_supply is None (inflationary)
+    m1_ema_spread:    float = 0.0    # 1m EMA6/EMA20 spread % (Pre-Breakout Watch)
+    m1_rsi_streak:    int   = 0      # consecutive 1m candles with RSI < 45 (PBW)
+    m1_vol_ratio:     float = 0.0    # 1m trigger vol / MA10 ratio (PBW)
+    sc_prior_move:    float = 0.0    # 24H price range % (Staircase prior leg)
+    ath_dist_pct:     float = 0.0    # % below 16D peak (direct field for PBW/SC without tech)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Cooldown — keyed by symbol, 2-hour window
@@ -322,6 +330,34 @@ def _mark_rb_alerted(symbol: str) -> None:
         del _rb_alerted[k]
 
 
+_pbw_alerted: dict[str, float] = {}
+
+
+def _on_pbw_cooldown(symbol: str) -> bool:
+    return (time.time() - _pbw_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+
+
+def _mark_pbw_alerted(symbol: str) -> None:
+    _pbw_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in _pbw_alerted.items() if ts < stale]:
+        del _pbw_alerted[k]
+
+
+_sc_alerted: dict[str, float] = {}
+
+
+def _on_sc_cooldown(symbol: str) -> bool:
+    return (time.time() - _sc_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_ALERT_COOLDOWN_MIN * 60
+
+
+def _mark_sc_alerted(symbol: str) -> None:
+    _sc_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in _sc_alerted.items() if ts < stale]:
+        del _sc_alerted[k]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage 1 helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -355,6 +391,8 @@ def _best_category_label(tags: list[str]) -> str:
         "gamefi":                "Gaming",
         "play-to-earn":          "Gaming",
         "metaverse":             "Gaming",
+        "fan-token":             "Fan Token",
+        "privacy":               "Privacy",
     }
     for t in tags:
         if t in _MAP:
@@ -526,31 +564,82 @@ def _score_fundamentals(change_1h: float, mcap: float,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _generate_warnings(tech: TechResult, change_1h: float,
-                        circ_pct: float, fdv_ratio: float) -> list[str]:
-    """Return up to 3 auto-generated risk warning strings (highest priority first)."""
-    warns: list[str] = []
+                        circ_pct: float, fdv_ratio: float,
+                        has_inf_supply: bool = False) -> list[str]:
+    """Generate up to 5 warnings (mandatory checks + optional risk flags)."""
+    mandatory: list[str] = []
+    optional:  list[str] = []
 
+    # Mandatory: always shown when condition met
+    if has_inf_supply:
+        mandatory.append("Max Supply: ∞")
+    if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
+        mandatory.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+    if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
+        mandatory.append(f"FDV/MCap: {fdv_ratio:.1f}×")
+
+    # Optional: technical risk flags
     if tech.h4_kdj_j >= cfg.MOMENTUM_TA_H4_KDJ_J_MAX:
-        warns.append(f"4H KDJ overheated ({tech.h4_kdj_j:.0f}) — strong move but watch for reversal")
+        optional.append(f"4H KDJ {tech.h4_kdj_j:.0f} — overheated, watch for reversal")
     if tech.m15_rsi6 > cfg.MOMENTUM_WARN_RSI6_PCT:
-        warns.append("RSI approaching overbought")
+        optional.append("RSI approaching overbought")
     if tech.m15_kdj_j > cfg.MOMENTUM_WARN_KDJ_J_PCT:
-        warns.append("KDJ getting hot")
+        optional.append("KDJ getting hot")
     if change_1h > cfg.MOMENTUM_WARN_GAIN_LATE_PCT:
-        warns.append("Late in momentum cycle")
-    if fdv_ratio > cfg.MOMENTUM_WARN_FDV_HIGH_RATIO:
-        warns.append("High dilution risk")
-    if circ_pct < cfg.MOMENTUM_WARN_CIRC_LOW_PCT:
-        warns.append("Dilution risk present")
+        optional.append("Late in momentum cycle")
     if tech.vol_pct < cfg.MOMENTUM_WARN_VOL_LOW_PCT:
-        warns.append("Volume not exceptional")
+        optional.append("Volume not exceptional")
 
-    return warns[:3]
+    return mandatory + optional[:2]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Main scan
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _check_1m_pbw(mexc_symbol: str) -> "dict | None":
+    """
+    Check 1m candles for Pre-Breakout Watch conditions.
+    Returns a dict with computed values, or None if data unavailable.
+    """
+    df_1m = get_mexc_futures_klines(mexc_symbol, "1m", limit=100)
+    if df_1m is None or len(df_1m) < 20:
+        return None
+
+    close_1m = df_1m["close"]
+    ema6_s   = compute_ema(close_1m, 6)
+    ema20_s  = compute_ema(close_1m, 20)
+    m1_ema6  = float(ema6_s.iloc[-1])
+    m1_ema20 = float(ema20_s.iloc[-1])
+    ema_spread = (abs(m1_ema6 - m1_ema20) / m1_ema20 * 100.0) if m1_ema20 > 0 else 999.0
+
+    rsi_s = compute_rsi(close_1m, period=6)
+    if len(rsi_s) < cfg.MOMENTUM_PBW_RSI_CANDLES:
+        return None
+
+    # Count consecutive recent candles with RSI < threshold
+    streak = 0
+    for i in range(1, len(rsi_s) + 1):
+        if float(rsi_s.iloc[-i]) < cfg.MOMENTUM_PBW_RSI_MAX:
+            streak += 1
+        else:
+            break
+
+    vol_s    = df_1m["volume"]
+    vol_last = float(vol_s.iloc[-1])
+    vol_ma10 = float(vol_s.rolling(10).mean().iloc[-1])
+    vol_ratio = vol_last / vol_ma10 if vol_ma10 > 0 else 0.0
+
+    return {
+        "ema_spread":  round(ema_spread, 3),
+        "compressed":  ema_spread < cfg.MOMENTUM_PBW_EMA_SPREAD_MAX,
+        "rsi_streak":  streak,
+        "rsi_ok":      streak >= cfg.MOMENTUM_PBW_RSI_CANDLES,
+        "vol_ratio":   round(vol_ratio, 2),
+        "trigger_vol": vol_ratio >= cfg.MOMENTUM_PBW_VOL_MULT,
+        "trigger_px":  float(close_1m.iloc[-1]) > m1_ema20,
+    }
+
 
 def scan() -> list[MomentumResult]:
     """
@@ -580,10 +669,13 @@ def scan() -> list[MomentumResult]:
     )
 
     # ── Stage 1: M1–M7 ───────────────────────────────────────────────────────
-    candidates    = []   # 2-10% 1H gain — main scoring pipeline
-    gc_candidates = []   # 0.5-8% 1H gain — Golden Cross pipeline
-    vs_candidates = []   # 1-6%  1H gain — Volume Spike pre-signal pipeline
-    rb_candidates = []   # 2-8%  1H gain — Recovery Bounce pipeline (24H negative)
+    candidates     = []   # 2-10% 1H gain — main scoring pipeline
+    gc_candidates  = []   # 0.5-8% 1H gain — Golden Cross pipeline
+    vs_candidates  = []   # 1-8%  1H gain — Volume Spike pipeline
+    rb_candidates  = []   # 2-8%  1H gain + 24H negative — Recovery Bounce pipeline
+    pbw_candidates = []   # 1-8%  1H gain — Pre-Breakout Watch pipeline
+    sc_candidates  = []   # -2% to +4% 1H gain — Staircase Continuation pipeline
+    _inf_supply_map: dict[str, bool] = {}   # symbol → has infinite supply
 
     for coin in coins:
         symbol = coin.get("symbol", "").upper()
@@ -599,16 +691,13 @@ def scan() -> list[MomentumResult]:
         vol_24h        = q.get("volume_24h")         or 0.0
 
         if change_1h < cfg.MOMENTUM_EARLY_EXIT_PCT:
-            break   # CMC sorted desc — no more candidates below GC minimum
+            break   # CMC sorted desc — break once below SC minimum
         if change_1h > cfg.MOMENTUM_ZONE_MAX:
-            continue   # parabolic — skip both pipelines
+            continue   # parabolic — skip all pipelines
 
         if not (cfg.MOMENTUM_MCAP_MIN_USD <= mcap <= cfg.MOMENTUM_MCAP_MAX_USD):
             continue
-        # M3: dual volume condition — absolute floor + 24h spike check
         if vol_24h < cfg.MOMENTUM_VOL_24H_MIN_USD:
-            continue
-        if vol_change_24h < (cfg.MOMENTUM_VOL_SPIKE_MIN - 1.0) * 100:
             continue
 
         circ_pct = _resolve_circ_pct(coin)
@@ -630,12 +719,24 @@ def scan() -> list[MomentumResult]:
         if mexc_symbol not in futures_set:
             continue
 
-        # Pipeline assignment
-        in_main = change_1h >= cfg.MOMENTUM_ZONE_MIN                              # 2-10%
-        in_gc   = change_1h <= cfg.MOMENTUM_GC_1H_MAX                             # 0.5-8%
-        in_vs   = cfg.MOMENTUM_VS_1H_MIN <= change_1h <= cfg.MOMENTUM_VS_1H_MAX   # 1-6%
-        in_rb   = (cfg.MOMENTUM_RB_1H_MIN <= change_1h <= cfg.MOMENTUM_RB_1H_MAX  # 2-8%
-                   and change_24h < -3.0)                                          # bouncing after pullback
+        has_inf_supply = coin.get("max_supply") is None
+        _inf_supply_map[symbol] = has_inf_supply
+
+        # Pipeline assignment (before vol_change_24h filter — SC skips it)
+        in_main = change_1h >= cfg.MOMENTUM_ZONE_MIN                                     # 2-10%
+        in_gc   = cfg.MOMENTUM_GC_1H_MIN <= change_1h <= cfg.MOMENTUM_GC_1H_MAX          # 0.5-8%
+        in_vs   = cfg.MOMENTUM_VS_1H_MIN <= change_1h <= cfg.MOMENTUM_VS_1H_MAX          # 1-8%
+        in_rb   = (cfg.MOMENTUM_RB_1H_MIN <= change_1h <= cfg.MOMENTUM_RB_1H_MAX         # 2-8%
+                   and change_24h < -3.0)
+        in_pbw  = cfg.MOMENTUM_PBW_1H_MIN <= change_1h <= cfg.MOMENTUM_PBW_1H_MAX        # 1-8%
+        in_sc   = (cfg.MOMENTUM_SC_1H_MIN <= change_1h <= cfg.MOMENTUM_SC_1H_MAX         # -2% to +4%
+                   and change_24h > 3.0)                                                  # had positive 24H
+
+        # M3 24H volume spike filter — required for all pipelines EXCEPT Staircase
+        # (SC candidates consolidate with low volume after the spike)
+        if not in_sc:
+            if vol_change_24h < (cfg.MOMENTUM_VOL_SPIKE_MIN - 1.0) * 100:
+                continue
 
         entry_tuple = (
             symbol, name, matched_tags, mexc_symbol,
@@ -657,6 +758,12 @@ def scan() -> list[MomentumResult]:
             vs_candidates.append(entry_tuple)
         if in_rb:
             rb_candidates.append(entry_tuple)
+        if in_pbw and not in_main and not in_vs:
+            log.debug(f"  PBW cand {symbol:<10}  1h {change_1h:+.2f}%  [{matched_tags[0]}]")
+            pbw_candidates.append(entry_tuple)
+        if in_sc:
+            log.debug(f"  SC cand  {symbol:<10}  1h {change_1h:+.2f}%  24h {change_24h:+.1f}%")
+            sc_candidates.append(entry_tuple)
 
     global _last_m1m7_count, _last_macro_blocked, _last_scan_outcomes, _last_rb_watchlist
     _last_scan_outcomes = []
@@ -664,7 +771,8 @@ def scan() -> list[MomentumResult]:
     _last_m1m7_count = len(candidates)
     log.info(
         f"Stage 1: {len(candidates)} M1–M7, {len(gc_candidates)} GC, "
-        f"{len(vs_candidates)} VS, {len(rb_candidates)} RB candidates."
+        f"{len(vs_candidates)} VS, {len(rb_candidates)} RB, "
+        f"{len(pbw_candidates)} PBW, {len(sc_candidates)} SC candidates."
     )
 
     # ── Stages 2 + 3: TA gate + full scoring ─────────────────────────────────
@@ -770,7 +878,8 @@ def scan() -> list[MomentumResult]:
             coin_sl_pct    = cfg.MOMENTUM_SL_PCT
 
         # Risk warnings
-        warnings = _generate_warnings(tech, change_1h, circ_pct, fdv_ratio)
+        warnings = _generate_warnings(tech, change_1h, circ_pct, fdv_ratio,
+                                       _inf_supply_map.get(symbol, False))
 
         early_note = f"  [15m {tech.m15_change:+.1f}%]" if recommendation == "EARLY SIGNAL" else ""
         log.info(
@@ -812,6 +921,8 @@ def scan() -> list[MomentumResult]:
             reward_tp2_usd  = _rwd_tp2,
             rr_str          = coin_rr_str,
             sl_pct          = coin_sl_pct,
+            infinite_supply = _inf_supply_map.get(symbol, False),
+            ath_dist_pct    = round(tech.ath_dist_pct, 1),
         ))
 
     # Sort best-first
@@ -1068,21 +1179,197 @@ def scan() -> list[MomentumResult]:
             sl_pct          = cfg.MOMENTUM_RB_SL_PCT,
         ))
 
+    # ── Stage 2e: Pre-Breakout Watch pipeline ────────────────────────────────
+    pbw_alerts: list[MomentumResult] = []
+    alerted_symbols = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts}
+
+    for entry in pbw_candidates:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
+
+        if symbol in alerted_symbols:
+            continue
+        if _on_pbw_cooldown(symbol):
+            continue
+
+        # 4H EMA stack check — no separation requirement (bypass sep check)
+        df_4h = get_mexc_futures_klines(mexc_symbol, "4h", limit=40)
+        if df_4h is None or len(df_4h) < 30:
+            continue
+        close_4h = df_4h["close"]
+        h4_ema6  = float(compute_ema(close_4h,  6).iloc[-1])
+        h4_ema12 = float(compute_ema(close_4h, 12).iloc[-1])
+        h4_ema20 = float(compute_ema(close_4h, 20).iloc[-1])
+        if not (h4_ema6 > h4_ema12 > h4_ema20):
+            log.debug(f"  PBW skip {symbol}: 4H EMA not bullish")
+            continue
+
+        # ATH distance from 4H data
+        h16d_high    = float(df_4h["high"].max())
+        ath_dist_pct = (h16d_high - price) / h16d_high * 100 if h16d_high > 0 else 0.0
+
+        pbw = _check_1m_pbw(mexc_symbol)
+        if pbw is None:
+            continue
+        if not pbw["compressed"]:
+            log.debug(f"  PBW skip {symbol}: EMA spread {pbw['ema_spread']:.3f}% ≥ {cfg.MOMENTUM_PBW_EMA_SPREAD_MAX}%")
+            continue
+        if not pbw["rsi_ok"]:
+            log.debug(f"  PBW skip {symbol}: RSI streak {pbw['rsi_streak']} < {cfg.MOMENTUM_PBW_RSI_CANDLES} candles")
+            continue
+        if not (pbw["trigger_vol"] and pbw["trigger_px"]):
+            log.debug(f"  PBW skip {symbol}: trigger not met (vol {pbw['vol_ratio']:.1f}×, px_above_ema={pbw['trigger_px']})")
+            continue
+
+        fund     = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
+        has_inf  = _inf_supply_map.get(symbol, False)
+        warnings = []
+        if has_inf:
+            warnings.append("Max Supply: ∞")
+        if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
+            warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+        if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
+            warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
+
+        log.info(
+            f"  🔍 PRE-BREAKOUT  {symbol}  1h {change_1h:+.2f}%  "
+            f"EMA {pbw['ema_spread']:.3f}%  RSI streak {pbw['rsi_streak']}  "
+            f"Vol {pbw['vol_ratio']:.1f}×"
+        )
+        _mark_pbw_alerted(symbol)
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, fund.total, "PBW", "PRE-BREAKOUT", 0.0, 0.0))
+
+        sl_f   = 1.0 - cfg.MOMENTUM_PBW_SL_PCT  / 100.0
+        tp1_f  = 1.0 + cfg.MOMENTUM_PBW_TP1_PCT / 100.0
+        tp2_f  = 1.0 + cfg.MOMENTUM_PBW_TP2_PCT / 100.0
+        risk   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_PBW_SL_PCT  / 100.0, 2)
+        rwd1   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_PBW_TP1_PCT / 100.0, 2)
+        rwd2   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_PBW_TP2_PCT / 100.0, 2)
+
+        pbw_alerts.append(MomentumResult(
+            symbol=symbol, name=name, price=round(price, 8),
+            change_1h=round(change_1h, 2), change_24h=round(change_24h, 2),
+            market_cap=mcap, volume_24h=vol_24h, fdv=fdv,
+            fdv_mcap_ratio=round(fdv_ratio, 2), circ_supply_pct=round(circ_pct, 1),
+            matched_tags=matched_tags, mexc_symbol=mexc_symbol,
+            fund=fund, total_score=fund.total,
+            recommendation="PRE-BREAKOUT", rec_emoji="🔍",
+            warnings=warnings, ath_pts=0,
+            entry_price=round(price, 8),
+            stop_loss=round(price * sl_f,  8),
+            tp1=round(price * tp1_f, 8),
+            tp2=round(price * tp2_f, 8),
+            risk_usd=risk, reward_tp1_usd=rwd1, reward_tp2_usd=rwd2,
+            rr_str=f"1:{rwd1/risk:.2f}", sl_pct=cfg.MOMENTUM_PBW_SL_PCT,
+            infinite_supply=has_inf,
+            m1_ema_spread=pbw["ema_spread"],
+            m1_rsi_streak=pbw["rsi_streak"],
+            m1_vol_ratio=pbw["vol_ratio"],
+            ath_dist_pct=round(ath_dist_pct, 1),
+        ))
+
+    # ── Stage 2f: Staircase Continuation pipeline ─────────────────────────────
+    sc_alerts: list[MomentumResult] = []
+    alerted_symbols = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts + pbw_alerts}
+
+    for entry in sc_candidates:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
+
+        if symbol in alerted_symbols:
+            continue
+        if _on_sc_cooldown(symbol):
+            continue
+
+        tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_SLOW_MIN)
+        if tech is None:
+            continue
+        if not tech.h4_ema_ok:
+            log.debug(f"  SC skip {symbol}: 4H EMA bearish")
+            continue
+
+        # Consolidation checks
+        if tech.vol_pct >= cfg.MOMENTUM_SC_VOL_MAX * 100:
+            log.debug(f"  SC skip {symbol}: vol {tech.vol_pct:.0f}% ≥ {cfg.MOMENTUM_SC_VOL_MAX*100:.0f}% (not low enough)")
+            continue
+        if tech.m15_rsi6 >= cfg.MOMENTUM_SC_RSI_MAX:
+            log.debug(f"  SC skip {symbol}: RSI {tech.m15_rsi6:.1f} ≥ {cfg.MOMENTUM_SC_RSI_MAX} (not cooled)")
+            continue
+        if tech.m15_kdj_j >= cfg.MOMENTUM_SC_KDJ_MAX:
+            log.debug(f"  SC skip {symbol}: KDJ J {tech.m15_kdj_j:.1f} ≥ {cfg.MOMENTUM_SC_KDJ_MAX} (not reset)")
+            continue
+
+        # Prior move: 24H high must be ≥8% above current price (confirms previous leg)
+        current       = tech.m15_price
+        prior_move_ok = tech.h24_high >= current * (1.0 + cfg.MOMENTUM_SC_PRIOR_MOVE_MIN / 100.0)
+        prior_move_pct = (tech.h24_high - current) / current * 100 if current > 0 else 0.0
+
+        if not prior_move_ok:
+            log.debug(f"  SC skip {symbol}: 24H high only {prior_move_pct:.1f}% above current (need {cfg.MOMENTUM_SC_PRIOR_MOVE_MIN}%)")
+            continue
+
+        fund    = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
+        has_inf = _inf_supply_map.get(symbol, False)
+        warnings = []
+        if has_inf:
+            warnings.append("Max Supply: ∞")
+        if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
+            warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+        if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
+            warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
+
+        log.info(
+            f"  🪜 STAIRCASE  {symbol}  1h {change_1h:+.2f}%  "
+            f"Vol {tech.vol_pct:.0f}%  RSI {tech.m15_rsi6:.1f}  KDJ {tech.m15_kdj_j:.1f}  "
+            f"prior +{prior_move_pct:.1f}%"
+        )
+        _mark_sc_alerted(symbol)
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, fund.total, "SC", "STAIRCASE", tech.vol_pct, tech.h4_kdj_j))
+
+        sl_f   = 1.0 - cfg.MOMENTUM_SC_SL_PCT  / 100.0
+        tp1_f  = 1.0 + cfg.MOMENTUM_SC_TP1_PCT / 100.0
+        tp2_f  = 1.0 + cfg.MOMENTUM_SC_TP2_PCT / 100.0
+        risk   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_SL_PCT  / 100.0, 2)
+        rwd1   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_TP1_PCT / 100.0, 2)
+        rwd2   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_TP2_PCT / 100.0, 2)
+
+        sc_alerts.append(MomentumResult(
+            symbol=symbol, name=name, price=round(price, 8),
+            change_1h=round(change_1h, 2), change_24h=round(change_24h, 2),
+            market_cap=mcap, volume_24h=vol_24h, fdv=fdv,
+            fdv_mcap_ratio=round(fdv_ratio, 2), circ_supply_pct=round(circ_pct, 1),
+            matched_tags=matched_tags, mexc_symbol=mexc_symbol,
+            tech=tech, fund=fund, total_score=fund.total,
+            recommendation="STAIRCASE", rec_emoji="🪜",
+            warnings=warnings, ath_pts=0,
+            entry_price=round(price, 8),
+            stop_loss=round(price * sl_f,  8),
+            tp1=round(price * tp1_f, 8),
+            tp2=round(price * tp2_f, 8),
+            risk_usd=risk, reward_tp1_usd=rwd1, reward_tp2_usd=rwd2,
+            rr_str=f"1:{rwd1/risk:.2f}", sl_pct=cfg.MOMENTUM_SC_SL_PCT,
+            infinite_supply=has_inf,
+            sc_prior_move=round(prior_move_pct, 1),
+            ath_dist_pct=round(tech.ath_dist_pct, 1),
+        ))
+
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
     early   = sum(r.recommendation == "EARLY SIGNAL" for r in new_alerts)
     gc      = len(gc_alerts)
     vs      = len(vs_alerts)
     rb      = len(rb_alerts)
+    pbw     = len(pbw_alerts)
+    sc_n    = len(sc_alerts)
     cooling = len(cooling_alerts)
     log.info(
         f"Scan done — {len(candidates)} M1–M7, "
         f"{macro_blocked_count} macro-blocked, "
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
         f"{strong} STRONG + {watch} WATCH + {early} EARLY + "
-        f"{gc} GC + {vs} VS + {rb} RB + {cooling} COOLING alerts."
+        f"{gc} GC + {vs} VS + {rb} RB + {pbw} PBW + {sc_n} SC + {cooling} COOLING alerts."
     )
-    return new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts
+    return new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts + pbw_alerts + sc_alerts
 
 
 # ══════════════════════════════════════════════════════════════════════════════

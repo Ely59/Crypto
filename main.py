@@ -31,6 +31,7 @@ import modules.altcoin_scout        as m2
 import modules.btc_trading_support  as m3
 import modules.telegram_alerts      as m4
 import modules.momentum_scanner     as m5
+import modules.alert_logger         as m_log
 from modules.stats_tracker import tracker
 import config as cfg
 from utils.logger import get_logger
@@ -230,8 +231,13 @@ def run_momentum_scan():
             m4.send_volume_spike_alert(coin)
         elif coin.recommendation == "RECOVERY":
             m4.send_recovery_alert(coin)
+        elif coin.recommendation == "PRE-BREAKOUT":
+            m4.send_pbw_alert(coin)
+        elif coin.recommendation == "STAIRCASE":
+            m4.send_staircase_alert(coin)
         else:
             m4.send_momentum_alert(coin)
+        m_log.log_alert(coin, coin.recommendation)
         sent += 1
 
     log.info(f"Momentum scan: {sent} alert(s) sent.")
@@ -247,6 +253,18 @@ def run_m5_daily_summary():
     m4.send_m5_daily_summary(stats)
     tracker.reset()
     log.info("Daily summary sent; stats reset.")
+
+
+def run_weekly_hitrate_report():
+    """
+    Weekly hit-rate report — runs every Sunday 09:00 Berlin.
+    Computes hit results for all pending alerts and sends a summary.
+    """
+    log.info("Running weekly hit-rate report…")
+    m_log.compute_hits_for_pending()
+    stats = m_log.get_weekly_stats(days=7)
+    m4.send_weekly_hitrate_report(stats)
+    log.info("Weekly hit-rate report sent.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -452,6 +470,15 @@ def start_scheduler():
         replace_existing = True,
     )
 
+    # ── Job 7: Weekly Hit-Rate Report — every Sunday 09:00 Berlin ─────────────
+    scheduler.add_job(
+        func             = run_weekly_hitrate_report,
+        trigger          = CronTrigger(day_of_week="sun", hour=9, minute=0, timezone=_BERLIN_TZ),
+        id               = "weekly_hitrate_report",
+        name             = "Weekly Hit-Rate Report (Sunday 09:00 Berlin)",
+        replace_existing = True,
+    )
+
     log.info("Scheduler started:")
     log.info(f"  • Daily briefing     — 08:00 Stuttgart (Europe/Berlin)")
     log.info(f"  • M5 daily summary   — 08:01 Stuttgart (Europe/Berlin)")
@@ -459,6 +486,7 @@ def start_scheduler():
     log.info(f"  • BTC Phase 1        — every 1H at :05 UTC  (direction detection)")
     log.info(f"  • BTC Phase 2        — every 15M at :00/:15/:30/:45 UTC  (entry timing)")
     log.info(f"  • Momentum Scanner   — every 15M at :02/:17/:32/:47 UTC  (Module 5)")
+    log.info(f"  • Weekly Hit-Rate    — every Sunday 09:00 Berlin")
     log.info("Press Ctrl+C to stop.")
 
     # Start the /status command listener before blocking

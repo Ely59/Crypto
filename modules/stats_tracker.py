@@ -43,6 +43,8 @@ class DailyStats:
     vs_alerts:      int        = 0   # VOLUME SPIKE pre-signal alerts sent
     rb_alerts:      int        = 0   # RECOVERY BOUNCE alerts sent
     cooling_alerts: int        = 0   # COOLING_DOWN (4H KDJ overheated) alerts sent
+    pbw_alerts:     int        = 0   # PRE-BREAKOUT Watch alerts sent
+    sc_alerts:      int        = 0   # STAIRCASE Continuation alerts sent
     best_coin:      str        = ""
     best_score:     int        = 0
     last_scan_ts:   str        = ""  # HH:MM Berlin time of most recent scan
@@ -113,6 +115,10 @@ class StatsTracker:
                     s.rb_alerts += 1
                 elif rec == "COOLING_DOWN":
                     s.cooling_alerts += 1
+                elif rec == "PRE-BREAKOUT":
+                    s.pbw_alerts += 1
+                elif rec == "STAIRCASE":
+                    s.sc_alerts += 1
 
                 _no_score = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY"}
 
@@ -201,7 +207,8 @@ class StatsTracker:
                 )
 
             total_alerts = (s.entry_alerts + s.watch_alerts + s.early_alerts +
-                            s.gc_alerts + s.vs_alerts + s.rb_alerts)
+                            s.gc_alerts + s.vs_alerts + s.rb_alerts +
+                            s.pbw_alerts + s.sc_alerts)
             lines = [
                 f"Last scan: <b>{s.last_scan_ts}</b> Berlin  |  Next in <b>{next_min} min</b>",
                 f"Scans today: <b>{s.scan_count}</b>",
@@ -209,7 +216,8 @@ class StatsTracker:
                 f"M1–M7 passed: <b>{s.coins_analyzed}</b>  |  4H blocked: <b>{s.macro_blocked}</b>",
                 f"Alerts sent: <b>{total_alerts}</b>  "
                 f"(Entry: {s.entry_alerts} | Watch: {s.watch_alerts} | Early: {s.early_alerts} "
-                f"| GC: {s.gc_alerts} | VS: {s.vs_alerts} | RB: {s.rb_alerts} | Cooling: {s.cooling_alerts})",
+                f"| GC: {s.gc_alerts} | VS: {s.vs_alerts} | RB: {s.rb_alerts} "
+                f"| PBW: {s.pbw_alerts} | SC: {s.sc_alerts} | Cooling: {s.cooling_alerts})",
             ]
 
             if s.top_coins:

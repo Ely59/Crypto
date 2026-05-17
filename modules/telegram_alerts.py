@@ -968,11 +968,19 @@ def build_momentum_alert(coin) -> str:
         "",
         f"Entry: <b>{_usd(coin.entry_price)}</b>",
         "",
-        f"SL: <b>{_usd(coin.stop_loss)}</b> (-{coin.sl_pct:.0f}%) → Risk: -${coin.risk_usd:.0f}",
+        f"SL (-{coin.sl_pct:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
         "",
-        f"TP1: <b>{_usd(coin.tp1)}</b> (+{cfg.MOMENTUM_TP1_PCT:.0f}%) → Reward: +${coin.reward_tp1_usd:.0f}",
+        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
         "",
-        f"TP2: <b>{_usd(coin.tp2)}</b> (+{cfg.MOMENTUM_TP2_PCT:.0f}%) → Max: +${coin.reward_tp2_usd:.0f}",
+        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+        "",
+    ]
+
+    ath_dist = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (coin.tech.ath_dist_pct if coin.tech else 0.0)
+    h4_status = "✅ Bullish" if (coin.tech and coin.tech.h4_ema_ok) else "❌ Bearish"
+    lines += [
+        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
+        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
         "",
         f"R/R: {coin.rr_str}",
     ]
@@ -980,7 +988,7 @@ def build_momentum_alert(coin) -> str:
     if coin.warnings:
         lines += ["", "⚠️ <b>RISKS:</b>"]
         for w in coin.warnings:
-            lines.append(f"• {w}")
+            lines.append(f"⚠️ {w}")
 
     mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
     lines += ["", f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>']
@@ -1114,12 +1122,28 @@ def build_volume_spike_alert(coin) -> str:
     t = coin.tech
     ratio = f"{t.m15_vol_spike_ratio:.1f}" if t is not None else "?"
 
+    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
+    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
+
     lines = [
         f"⚡ <b>VOLUME SPIKE: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         f"Volume <b>{ratio}×</b> normal — move may be starting.",
         "Watch for entry. Not confirmed yet.",
         "",
-        f"Price: <b>{_usd(coin.entry_price)}</b>  |  SL if entering: -5% = <b>{_usd(coin.stop_loss)}</b>",
+        f"Entry: <b>{_usd(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_VS_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+        "",
+        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
+        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
+    ]
+
+    if coin.warnings:
+        for w in coin.warnings:
+            lines.append(f"⚠️ {w}")
+
+    lines += [
         "",
         "⚠️ <i>Pre-signal only — wait for GC or breakout confirmation before entry</i>",
         f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
@@ -1143,15 +1167,28 @@ def build_recovery_alert(coin) -> str:
     prev_peak = _usd(t.h24_high) if t is not None else "?"
     pullback_pct = ((t.h24_high - coin.entry_price) / t.h24_high * 100) if t is not None and t.h24_high > 0 else 0.0
 
+    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
+    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
+
     lines = [
         f"♻️ <b>RECOVERY: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         f"Post-pump bounce — previous 24H peak: <b>{prev_peak}</b>",
         f"Pulled back <b>{pullback_pct:.1f}%</b> — now recovering.",
         "",
         f"Entry: <b>{_usd(coin.entry_price)}</b>",
-        f"SL: -5% (tight — peak overhead) = <b>{_usd(coin.stop_loss)}</b>",
-        f"TP1: +{cfg.MOMENTUM_RB_TP1_PCT:.0f}% → <b>{_usd(coin.tp1)}</b> (conservative)",
-        f"TP2: +{cfg.MOMENTUM_RB_TP2_PCT:.0f}% → <b>{_usd(coin.tp2)}</b> (below old peak)",
+        f"SL (-{cfg.MOMENTUM_RB_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_RB_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_RB_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+        "",
+        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
+        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
+    ]
+
+    if coin.warnings:
+        for w in coin.warnings:
+            lines.append(f"⚠️ {w}")
+
+    lines += [
         "",
         "⚠️ <i>Old peak acts as resistance — take partial profits early</i>",
         f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
@@ -1176,22 +1213,32 @@ def build_golden_cross_alert(coin) -> str:
     mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
     t = coin.tech
 
+    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
+    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
+
     lines = [
         f"⚡ <b>GOLDEN CROSS: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
         "EMA6 just crossed above EMA20 on 15m.",
         "Very early signal — move just starting.",
         "",
         f"Entry: <b>{_usd(coin.entry_price)}</b>",
-        f"SL: -5% = <b>{_usd(coin.stop_loss)}</b>",
-        f"TP1: +10% = <b>{_usd(coin.tp1)}</b>  |  TP2: +20% = <b>{_usd(coin.tp2)}</b>",
+        f"SL (-{cfg.MOMENTUM_GC_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
         "",
-        "⚠️ <i>Early signal: verify chart before entry</i>",
+        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
+        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
     ]
 
-    if t is not None and t.vol_pct < cfg.MOMENTUM_VOL_GC_WARN * 100:
-        lines.append("⚠️ <i>Low volume at cross — confirm with price action before entry</i>")
+    if coin.warnings:
+        for w in coin.warnings:
+            lines.append(f"⚠️ {w}")
 
-    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
+    if t is not None and t.vol_pct < cfg.MOMENTUM_VOL_GC_WARN * 100:
+        lines.append("⚠️ Low volume at cross — confirm with price action before entry")
+
+    lines += ["", "⚠️ <i>Early signal: verify chart before entry</i>",
+              f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>']
     return "\n".join(lines)
 
 
@@ -1199,6 +1246,148 @@ def send_golden_cross_alert(coin) -> bool:
     """Send a Module 5 Golden Cross early-entry alert to Telegram."""
     log.info(f"Sending GOLDEN CROSS alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
     return send_message(build_golden_cross_alert(coin))
+
+
+def build_pbw_alert(coin) -> str:
+    """🔍 PRE-BREAKOUT Watch alert — slow-grind accumulation before breakout."""
+    mexc_url  = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    h4_status = "✅ Bullish"   # PBW only fires when 4H EMA stack is bullish
+    score_str = str(coin.total_score) if coin.total_score > 0 else "—"
+
+    lines = [
+        f"🔍 <b>PRE-BREAKOUT: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
+        f"RSI&lt;45 seit {coin.m1_rsi_streak} Kerzen | EMAs komprimiert ({coin.m1_ema_spread:.3f}%)",
+        f"Erste Volumen-Kerze bestätigt ({coin.m1_vol_ratio:.1f}×).",
+        "",
+        f"Entry: <b>{_usd(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_PBW_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_PBW_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_PBW_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+        "",
+        f"ATH-Dist: -{coin.ath_dist_pct:.0f}% 📊 | Score: {score_str}/100",
+        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
+    ]
+
+    if coin.warnings:
+        for w in coin.warnings:
+            lines.append(f"⚠️ {w}")
+
+    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
+    return "\n".join(lines)
+
+
+def send_pbw_alert(coin) -> bool:
+    """Send a Module 5 Pre-Breakout Watch alert to Telegram."""
+    log.info(f"Sending PRE-BREAKOUT alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
+    return send_message(build_pbw_alert(coin))
+
+
+def build_staircase_alert(coin) -> str:
+    """🪜 STAIRCASE Continuation alert — consolidation pause before leg 2."""
+    mexc_url  = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    t         = coin.tech
+    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
+    vol_pct   = f"{t.vol_pct:.0f}%" if t else "?"
+    rsi_val   = f"{t.m15_rsi6:.1f}" if t else "?"
+    kdj_val   = f"{t.m15_kdj_j:.1f}" if t else "?"
+    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
+    score_str = str(coin.total_score) if coin.total_score > 0 else "—"
+
+    lines = [
+        f"🪜 <b>STAIRCASE: {coin.symbol}</b> — Konsolidierung vor Leg 2",
+        f"4H Trend intakt | 15m Vol: {vol_pct} von MA10",
+        f"RSI abgekühlt: {rsi_val} | KDJ J: {kdj_val}",
+        f"Vorheriger Leg: +{coin.sc_prior_move:.1f}% ✅",
+        "",
+        f"Entry: <b>{_usd(coin.entry_price)}</b>",
+        f"SL (-{cfg.MOMENTUM_SC_SL_PCT:.0f}%): <b>{_usd(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_SC_TP1_PCT:.0f}%): <b>{_usd(coin.tp1)}</b> → 60% close",
+        f"TP2 (+{cfg.MOMENTUM_SC_TP2_PCT:.0f}%): <b>{_usd(coin.tp2)}</b>",
+        "",
+        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {score_str}/100",
+        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
+    ]
+
+    if coin.warnings:
+        for w in coin.warnings:
+            lines.append(f"⚠️ {w}")
+
+    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
+    return "\n".join(lines)
+
+
+def send_staircase_alert(coin) -> bool:
+    """Send a Module 5 Staircase Continuation alert to Telegram."""
+    log.info(f"Sending STAIRCASE alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
+    return send_message(build_staircase_alert(coin))
+
+
+def build_weekly_hitrate_report(stats: dict) -> str:
+    """
+    Weekly hit-rate report — sent every Sunday 09:00 Berlin.
+    stats is the dict returned by modules.alert_logger.get_weekly_stats().
+    """
+    from datetime import datetime, timedelta
+    now      = datetime.now(tz=_STUTTGART_TZ)
+    end_date = now.strftime("%d.%m")
+    start_date = (now - timedelta(days=stats.get("period_days", 7))).strftime("%d.%m")
+
+    by_sig = stats.get("by_signal", {})
+
+    _sig_labels = {
+        "GOLDEN CROSS":  "⚡ Golden Cross",
+        "VOLUME SPIKE":  "⚡ Volume Spike",
+        "PRE-BREAKOUT":  "🔍 Pre-Breakout",
+        "STAIRCASE":     "🪜 Staircase",
+        "RECOVERY":      "♻️ Recovery Bounce",
+        "STRONG ENTRY":  "🟢 Strong Entry",
+        "WATCH":         "🟡 Watch",
+        "EARLY SIGNAL":  "🔍 Early Signal",
+    }
+
+    lines = [
+        "📊 <b>WÖCHENTLICHER HIT-RATE REPORT</b>",
+        f"Zeitraum: {start_date} – {end_date}",
+        "",
+    ]
+
+    total_hits  = 0
+    total_count = 0
+    for sig_key, label in _sig_labels.items():
+        if sig_key not in by_sig:
+            continue
+        d     = by_sig[sig_key]
+        hits  = d["hits"]
+        count = d["total"]
+        pct   = f"{hits / count * 100:.0f}%" if count > 0 else "—"
+        lines.append(f"{label}:  {hits}/{count} Hits ({pct})")
+        total_hits  += hits
+        total_count += count
+
+    if not total_count:
+        lines.append("Keine Daten für diese Woche.")
+        return "\n".join(lines)
+
+    total_pct = f"{total_hits / total_count * 100:.0f}%" if total_count > 0 else "—"
+    lines += [
+        "",
+        f"<b>Gesamt: {total_hits}/{total_count} Hits ({total_pct})</b>",
+    ]
+
+    best  = stats.get("best",  {})
+    worst = stats.get("worst", {})
+    if best.get("coin"):
+        lines.append(f"Bester Trade: <b>{best['coin']}</b> +{best['roi']:.1f}%")
+    if worst.get("coin"):
+        lines.append(f"Schlechtester: <b>{worst['coin']}</b> {worst['roi']:+.1f}%")
+
+    return "\n".join(lines)
+
+
+def send_weekly_hitrate_report(stats: dict) -> bool:
+    """Send the weekly hit-rate report to Telegram."""
+    log.info("Sending weekly hit-rate report…")
+    return send_message(build_weekly_hitrate_report(stats))
 
 
 # ── Startup message ────────────────────────────────────────────────────────────
