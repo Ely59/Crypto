@@ -139,15 +139,23 @@ LOG_FILE  = "logs/crypto_ecosystem.log"
 MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com"  # Futures/perp API (no key needed)
 
 # 1h momentum gate
-MOMENTUM_ZONE_MIN            = 1.5    # minimum 1h gain % to qualify — M1 filter  (was 2.0)
-MOMENTUM_ZONE_MAX            = 12.0   # maximum 1h gain % — fast pumps hit GC at 10-12%  (was 10.0)
+MOMENTUM_ZONE_MIN            = 1.0    # minimum 1h gain % to qualify — M1 filter  (was 1.5)
+MOMENTUM_ZONE_MAX            = 15.0   # maximum 1h gain % — fast pumps hit GC at 10-15%  (was 12.0)
 MOMENTUM_EARLY_EXIT_PCT      = -2.0   # CMC loop break — extended for Staircase signal (was 0.5)
 
 # Market-cap & liquidity filters
-MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M minimum market cap
+MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M standard minimum — micro-cap bypass below
 MOMENTUM_MCAP_MAX_USD        = 5_000_000_000   # $5B maximum market cap
-MOMENTUM_VOL_24H_MIN_USD     = 5_000_000       # $5M minimum 24h volume  (was $10M)
+MOMENTUM_MCAP_MICRO_MIN_USD  = 10_000_000      # $10M absolute hard floor (no exceptions)
+MOMENTUM_MCAP_MICRO_VOLMC_MIN = 1.50           # Vol/MC ratio (150%) required to bypass $25M floor
+MOMENTUM_VOL_24H_MIN_USD     = 5_000_000       # $5M minimum 24h volume — bypassed if Vol/MC > 150%
+MOMENTUM_VOLMC_BYPASS_MIN    = 1.50            # Vol/MC > 150% → bypass $5M absolute vol floor
+MOMENTUM_VOLMC_DEAD_MAX      = 0.20            # Vol/MC < 20% → dead coin, block regardless of abs vol
 MOMENTUM_VOL_SPIKE_MIN       = 1.30            # vol_change_24h must be ≥ this ratio (130% of prior 24h)
+
+# 15m candle fast-track bypass (CHANGE 1C)
+MOMENTUM_FT_15M_GAIN_MIN     = 3.0    # fast-track: 15m last candle must show ≥ 3% gain
+MOMENTUM_FT_15M_VOL_MULT     = 5.0    # fast-track: 15m last candle vol ≥ 5× avg of prior 3 candles
 
 # Supply / dilution filters
 MOMENTUM_CIRC_SUPPLY_MIN_PCT = 40.0   # circulating / max_supply >= 40 %

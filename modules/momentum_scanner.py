@@ -602,14 +602,19 @@ def _score_fundamentals(change_1h: float, mcap: float,
 
 def _generate_warnings(tech: TechResult, change_1h: float,
                         circ_pct: float, fdv_ratio: float,
-                        has_inf_supply: bool = False) -> list[str]:
+                        has_inf_supply: bool = False,
+                        is_micro_cap: bool = False,
+                        mcap: float = 0.0) -> list[str]:
     """Generate up to 5 warnings (mandatory checks + optional risk flags)."""
     mandatory: list[str] = []
     optional:  list[str] = []
 
     # Mandatory: always shown when condition met
+    if is_micro_cap:
+        mandatory.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+        mandatory.append("⚠️ Treat as high-risk, max 50% normal margin")
     if has_inf_supply:
-        mandatory.append("Max Supply: ∞")
+        mandatory.append("⚠️ Max Supply unknown — inflation risk")
     if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
         mandatory.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
     if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
@@ -755,6 +760,26 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
         tech.m5_note = ""
 
 
+def _check_15m_fasttrack(mexc_symbol: str) -> bool:
+    """
+    Fast-track bypass (CHANGE 1C): check if the last closed 15m candle is a spike.
+    Qualifies if: candle gain ≥ 3% AND candle vol ≥ 5× avg of prior 3 candles.
+    Used to admit coins that pass M2-M7 but sit below the M1 1H gain floor.
+    """
+    df = get_mexc_futures_klines(mexc_symbol, "15m", limit=5)
+    if df is None or len(df) < 4:
+        return False
+    last_open  = float(df["open"].iloc[-1])
+    last_close = float(df["close"].iloc[-1])
+    candle_gain = (last_close - last_open) / last_open * 100.0 if last_open > 0 else 0.0
+    if candle_gain < cfg.MOMENTUM_FT_15M_GAIN_MIN:
+        return False
+    vol = df["volume"]
+    vol_last  = float(vol.iloc[-1])
+    vol_prev3 = float(vol.iloc[-4:-1].mean()) if len(vol) >= 4 else vol_last
+    return vol_prev3 > 0 and vol_last >= cfg.MOMENTUM_FT_15M_VOL_MULT * vol_prev3
+
+
 def scan() -> list[MomentumResult]:
     """
     Run one full momentum scan.
@@ -783,13 +808,23 @@ def scan() -> list[MomentumResult]:
     )
 
     # ── Stage 1: M1–M7 ───────────────────────────────────────────────────────
-    candidates     = []   # 2-10% 1H gain — main scoring pipeline
+    candidates     = []   # 1-15% 1H gain — main scoring pipeline
     gc_candidates  = []   # 0.5-8% 1H gain — Golden Cross pipeline
     vs_candidates  = []   # 1-8%  1H gain — Volume Spike pipeline
     rb_candidates  = []   # 2-8%  1H gain + 24H negative — Recovery Bounce pipeline
     pbw_candidates = []   # 1-8%  1H gain — Pre-Breakout Watch pipeline
     sc_candidates  = []   # -2% to +4% 1H gain — Staircase Continuation pipeline
+    ft_candidates  = []   # below ZONE_MIN — pending 15m fast-track check
     _inf_supply_map: dict[str, bool] = {}   # symbol → has infinite supply
+    _micro_cap_set:  set[str] = set()       # symbols that bypassed via micro-cap Vol/MC rule
+
+    # Stage 1 block counters — logged at end of Stage 1 for filter analysis
+    _s1_mcap_blocked    = 0
+    _s1_vol_blocked     = 0
+    _s1_supply_blocked  = 0
+    _s1_fdv_blocked     = 0
+    _s1_tags_blocked    = 0
+    _s1_mexc_blocked    = 0
 
     for coin in coins:
         symbol = coin.get("symbol", "").upper()
@@ -809,13 +844,32 @@ def scan() -> list[MomentumResult]:
         if change_1h > cfg.MOMENTUM_ZONE_MAX:
             continue   # parabolic — skip all pipelines
 
-        if not (cfg.MOMENTUM_MCAP_MIN_USD <= mcap <= cfg.MOMENTUM_MCAP_MAX_USD):
+        # M2: Market cap (1A — micro-cap bypass: $10M-$25M allowed if Vol/MC > 150%)
+        if mcap > cfg.MOMENTUM_MCAP_MAX_USD:
+            _s1_mcap_blocked += 1
             continue
-        if vol_24h < cfg.MOMENTUM_VOL_24H_MIN_USD:
+        vol_mc_ratio = vol_24h / mcap if mcap > 0 else 0.0
+        is_micro_cap = cfg.MOMENTUM_MCAP_MICRO_MIN_USD <= mcap < cfg.MOMENTUM_MCAP_MIN_USD
+        if mcap < cfg.MOMENTUM_MCAP_MICRO_MIN_USD:          # hard floor $10M — no exceptions
+            _s1_mcap_blocked += 1
+            continue
+        if is_micro_cap and vol_mc_ratio < cfg.MOMENTUM_MCAP_MICRO_VOLMC_MIN:
+            _s1_mcap_blocked += 1
             continue
 
+        # M3: Volume (1B — bypass $5M absolute floor if Vol/MC > 150%; block dead coins < 20%)
+        if vol_mc_ratio < cfg.MOMENTUM_VOLMC_DEAD_MAX:      # dead coin — no interest
+            _s1_vol_blocked += 1
+            continue
+        if vol_24h < cfg.MOMENTUM_VOL_24H_MIN_USD and vol_mc_ratio < cfg.MOMENTUM_VOLMC_BYPASS_MIN:
+            _s1_vol_blocked += 1
+            continue
+
+        # M4: Supply (1D — inf-supply coins bypass circ% gate, get mandatory warning instead)
+        has_inf_supply = coin.get("max_supply") is None
         circ_pct = _resolve_circ_pct(coin)
-        if circ_pct < cfg.MOMENTUM_CIRC_SUPPLY_MIN_PCT:
+        if not has_inf_supply and circ_pct < cfg.MOMENTUM_CIRC_SUPPLY_MIN_PCT:
+            _s1_supply_blocked += 1
             continue
 
         fdv = _resolve_fdv(coin, price)
@@ -823,18 +877,22 @@ def scan() -> list[MomentumResult]:
             continue
         fdv_ratio = fdv / mcap
         if fdv_ratio > cfg.MOMENTUM_FDV_RATIO_MAX:
+            _s1_fdv_blocked += 1
             continue
 
         matched_tags = [t for t in tags if t in cfg.MOMENTUM_ALLOWED_TAGS]
         if not matched_tags:
+            _s1_tags_blocked += 1
             continue
 
         mexc_symbol = f"{symbol}_USDT"
         if mexc_symbol not in futures_set:
+            _s1_mexc_blocked += 1
             continue
 
-        has_inf_supply = coin.get("max_supply") is None
         _inf_supply_map[symbol] = has_inf_supply
+        if is_micro_cap:
+            _micro_cap_set.add(symbol)
 
         # Pipeline assignment (before vol_change_24h filter — SC skips it)
         in_main = cfg.MOMENTUM_ZONE_MIN <= change_1h <= cfg.MOMENTUM_ZONE_MAX          # 1.5-12%
@@ -845,6 +903,14 @@ def scan() -> list[MomentumResult]:
         in_pbw  = cfg.MOMENTUM_PBW_1H_MIN <= change_1h <= cfg.MOMENTUM_PBW_1H_MAX        # 1-8%
         in_sc   = (cfg.MOMENTUM_SC_1H_MIN <= change_1h <= cfg.MOMENTUM_SC_1H_MAX         # -2% to +4%
                    and change_24h > 3.0)                                                  # had positive 24H
+
+        # Fast-track collection (1C): coin below ZONE_MIN that passes M2-M7
+        # 15m candle spike check runs after Stage 1 completes (avoid per-coin API calls in loop)
+        if change_1h < cfg.MOMENTUM_ZONE_MIN and not in_sc:
+            ft_candidates.append((
+                symbol, name, matched_tags, mexc_symbol,
+                price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct,
+            ))
 
         # M3 24H volume spike filter — required for all pipelines EXCEPT Staircase
         # (SC candidates consolidate with low volume after the spike)
@@ -878,6 +944,35 @@ def scan() -> list[MomentumResult]:
         if in_sc:
             log.debug(f"  SC cand  {symbol:<10}  1h {change_1h:+.2f}%  24h {change_24h:+.1f}%")
             sc_candidates.append(entry_tuple)
+
+    # ── Fast-track: check 15m spike for below-ZONE_MIN coins (CHANGE 1C) ────────
+    _fast_track_count = 0
+    _candidates_syms  = {e[0] for e in candidates}
+    for ft_entry in ft_candidates:
+        sym_ft = ft_entry[0]
+        if sym_ft in _candidates_syms:
+            continue   # already in main pipeline via another path
+        mex_ft = ft_entry[3]
+        chg_ft = ft_entry[5]
+        mc_ft  = ft_entry[7]
+        if _check_15m_fasttrack(mex_ft):
+            _fast_track_count += 1
+            _candidates_syms.add(sym_ft)
+            candidates.append(ft_entry)
+            log.info(
+                f"  ⚡ FAST-TRACK  {sym_ft:<10}  1h {chg_ft:+.2f}%  "
+                f"MCap ${mc_ft/1e6:.0f}M — 15m spike bypasses 1H filter"
+            )
+
+    # Stage 1 filter breakdown — logged every scan for pipeline analysis
+    log.info(
+        f"Stage 1 filter stats: "
+        f"MCap-block={_s1_mcap_blocked} | Vol-block={_s1_vol_blocked} | "
+        f"Supply-block={_s1_supply_blocked} | FDV-block={_s1_fdv_blocked} | "
+        f"Tags-block={_s1_tags_blocked} | MEXC-block={_s1_mexc_blocked} | "
+        f"MicroCap-allowed={len(_micro_cap_set)} | "
+        f"FastTrack={_fast_track_count}/{len(ft_candidates)}"
+    )
 
     global _last_m1m7_count, _last_macro_blocked, _last_scan_outcomes, _last_rb_watchlist
     _last_scan_outcomes = []
@@ -1008,7 +1103,9 @@ def scan() -> list[MomentumResult]:
 
         # Risk warnings
         warnings = _generate_warnings(tech, change_1h, circ_pct, fdv_ratio,
-                                       _inf_supply_map.get(symbol, False))
+                                       _inf_supply_map.get(symbol, False),
+                                       is_micro_cap=(symbol in _micro_cap_set),
+                                       mcap=mcap)
 
         early_note = f"  [15m {tech.m15_change:+.1f}%]" if recommendation == "EARLY SIGNAL" else ""
         log.info(
@@ -1386,8 +1483,11 @@ def scan() -> list[MomentumResult]:
         fund     = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
         has_inf  = _inf_supply_map.get(symbol, False)
         warnings = []
+        if symbol in _micro_cap_set:
+            warnings.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+            warnings.append("⚠️ Treat as high-risk, max 50% normal margin")
         if has_inf:
-            warnings.append("Max Supply: ∞")
+            warnings.append("⚠️ Max Supply unknown — inflation risk")
         if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
             warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
@@ -1482,8 +1582,11 @@ def scan() -> list[MomentumResult]:
         fund    = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
         has_inf = _inf_supply_map.get(symbol, False)
         warnings = []
+        if symbol in _micro_cap_set:
+            warnings.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+            warnings.append("⚠️ Treat as high-risk, max 50% normal margin")
         if has_inf:
-            warnings.append("Max Supply: ∞")
+            warnings.append("⚠️ Max Supply unknown — inflation risk")
         if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
             warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
