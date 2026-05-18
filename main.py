@@ -215,7 +215,16 @@ def run_momentum_scan():
     _consecutive_failures = 0
 
     # Record stats regardless of whether results were returned
-    tracker.record_scan(results, m5._last_m1m7_count, m5._last_macro_blocked, m5._last_scan_outcomes)
+    tracker.record_scan(
+        results, m5._last_m1m7_count, m5._last_macro_blocked, m5._last_scan_outcomes,
+        s2a_ema_bearish   = m5._last_s2a_ema_bearish,
+        s2a_sep_small     = m5._last_s2a_sep_small,
+        s2a_15m_gate      = m5._last_s2a_15m_gate,
+        s2a_fear_bypassed = m5._last_s2a_fear_bypassed,
+        s2a_squeeze       = m5._last_s2a_squeeze,
+        fear_mode_active  = m5._fear_mode,
+        fear_greed_value  = m5._fg_value,
+    )
 
     if not results:
         log.info("Momentum scan: no new alerts this cycle.")

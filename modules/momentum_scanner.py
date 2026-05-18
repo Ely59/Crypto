@@ -59,6 +59,7 @@ if _ROOT not in _sys.path:
     _sys.path.insert(0, _ROOT)
 
 import time
+import requests as _req
 from dataclasses import dataclass, field
 
 from utils.api_client import (
@@ -71,6 +72,50 @@ from utils.logger     import get_logger
 import config as cfg
 
 log = get_logger(__name__)
+
+# ── Market context cache (Fear & Greed + BTC 24H) ────────────────────────────
+_fg_value:      int   = 50     # Fear & Greed index (0-100); default = neutral
+_fg_fetched_at: float = 0.0   # Unix timestamp of last successful fetch
+_fear_mode:     bool  = False  # True when F&G < MOMENTUM_FEAR_FG_THRESHOLD
+_btc_24h_change: float = 0.0  # BTC 24H % change (for relative-strength bypass)
+
+# Stage 2a block counters — reset per scan, exposed for stats_tracker
+_last_s2a_ema_bearish:   int = 0
+_last_s2a_sep_small:     int = 0
+_last_s2a_15m_gate:      int = 0
+_last_s2a_fear_bypassed: int = 0
+_last_s2a_squeeze:       int = 0
+
+
+def _refresh_market_context() -> None:
+    """
+    Fetch Fear & Greed index (alternative.me) + BTC 24H change (MEXC daily kline).
+    Results cached for 1 hour; safe to call before every scan.
+    """
+    global _fg_value, _fg_fetched_at, _fear_mode, _btc_24h_change
+    if time.time() - _fg_fetched_at < 3600:
+        return
+
+    try:
+        resp = _req.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+        _fg_value = int(resp.json()["data"][0]["value"])
+    except Exception as e:
+        log.warning(f"F&G fetch failed: {e}")
+
+    try:
+        df_btc = get_mexc_futures_klines("BTC_USDT", "1d", limit=2)
+        if df_btc is not None and len(df_btc) >= 2:
+            prev = float(df_btc["close"].iloc[-2])
+            last = float(df_btc["close"].iloc[-1])
+            _btc_24h_change = (last - prev) / prev * 100.0 if prev > 0 else 0.0
+    except Exception as e:
+        log.warning(f"BTC 24H change fetch failed: {e}")
+
+    _fear_mode = _fg_value < cfg.MOMENTUM_FEAR_FG_THRESHOLD
+    _fg_fetched_at = time.time()
+    mode_str = f"😟 FEAR MODE (F&G {_fg_value})" if _fear_mode else f"Normal (F&G {_fg_value})"
+    log.info(f"Market context: {mode_str} | BTC 24H {_btc_24h_change:+.1f}%")
+
 
 # Scoring point values — technical layer
 _PTS_EMA   = 15
@@ -176,6 +221,10 @@ class TechResult:
     m5_ok:                bool  = False
     m5_note:              str   = ""
 
+    # Squeeze / Fear Mode support
+    h4_ema20_slope:       float = 0.0   # % change of 4H EMA20 over last 5 candles (CHANGE 2B)
+    m15_price_gt_h4_ema20: bool = False  # 15m price > 4H EMA20 (breakout confirmation)
+
 
 @dataclass
 class FundResult:
@@ -242,6 +291,9 @@ class MomentumResult:
     m5_rsi6:   float = 0.0
     m5_kdj_j:  float = 0.0
     m5_note:   str   = ""
+
+    # Gate 2g — BB-Squeeze bypass flag (CHANGE 2B)
+    squeeze_bypass: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -446,12 +498,19 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     close_4h = df_4h["close"]
 
     # ── 4H Macro Filter ──────────────────────────────────────────────────────
-    h4_ema6  = float(compute_ema(close_4h,  6).iloc[-1])
-    h4_ema12 = float(compute_ema(close_4h, 12).iloc[-1])
-    h4_ema20 = float(compute_ema(close_4h, 20).iloc[-1])
+    ema20_4h_s = compute_ema(close_4h, 20)
+    h4_ema6    = float(compute_ema(close_4h,  6).iloc[-1])
+    h4_ema12   = float(compute_ema(close_4h, 12).iloc[-1])
+    h4_ema20   = float(ema20_4h_s.iloc[-1])
     h4_ema_sep = (h4_ema6 - h4_ema20) / h4_ema20 if h4_ema20 > 0 else 0.0
     h4_ema_ok  = (h4_ema6 > h4_ema12 > h4_ema20 and
                   h4_ema_sep >= cfg.MOMENTUM_TA_H4_EMA_SEP_MIN)
+
+    # EMA20 slope over last 5 candles — used by gate 2g squeeze detection
+    h4_ema20_slope = 0.0
+    if len(ema20_4h_s) >= 6:
+        prev5 = float(ema20_4h_s.iloc[-6])
+        h4_ema20_slope = (h4_ema20 - prev5) / prev5 * 100.0 if prev5 > 0 else 0.0
 
     h4_rsi6    = float(compute_rsi(close_4h, period=6).iloc[-1])
     h4_dif, h4_dea, _ = compute_macd(close_4h)
@@ -493,9 +552,10 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         m15_ema6 > m15_ema20
     )
 
-    m15_price     = float(close_15m.iloc[-1])
-    m15_price_ok  = m15_price > m15_ema20
-    m15_price_pts = _PTS_PRICE if m15_price_ok else 0
+    m15_price              = float(close_15m.iloc[-1])
+    m15_price_ok           = m15_price > m15_ema20
+    m15_price_pts          = _PTS_PRICE if m15_price_ok else 0
+    m15_price_gt_h4_ema20  = m15_price > h4_ema20   # breakout above 4H EMA20 (squeeze check)
 
     m15_rsi6     = float(compute_rsi(close_15m, period=6).iloc[-1])
     m15_rsi6_ok  = cfg.MOMENTUM_TA_15M_RSI6_MIN <= m15_rsi6 <= cfg.MOMENTUM_RSI_MAX
@@ -565,6 +625,8 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         h4_macd_ok=h4_macd_ok,
         m15_ema12=round(m15_ema12, 8),
         m15_ema6_gt_ema12=m15_ema6_gt_ema12,
+        h4_ema20_slope=round(h4_ema20_slope, 3),
+        m15_price_gt_h4_ema20=m15_price_gt_h4_ema20,
     )
 
 
@@ -788,6 +850,8 @@ def scan() -> list[MomentumResult]:
     sorted by total score descending, capped at MOMENTUM_MAX_ALERTS_PER_SCAN,
     and filtered by cooldown.
     """
+    _refresh_market_context()   # update F&G + BTC 24H once per hour
+
     futures_set = get_mexc_futures_symbols()
     if not futures_set:
         log.error("Momentum scan aborted — MEXC futures list unavailable.")
@@ -989,6 +1053,13 @@ def scan() -> list[MomentumResult]:
     cooling_alerts:      list[MomentumResult] = []
     macro_blocked_count: int = 0
 
+    # Stage 2a block counters (CHANGE 2C)
+    _s2a_ema_bearish:   int = 0   # EMA6 not > EMA12 > EMA20
+    _s2a_sep_small:     int = 0   # EMA order ok but sep < 0.2%
+    _s2a_15m_gate:      int = 0   # 15m EMA6 < EMA12
+    _s2a_fear_bypassed: int = 0   # allowed via Fear Mode relaxation
+    _s2a_squeeze:       int = 0   # bypassed via gate 2g BB-Squeeze
+
     # Pre-compute fixed trade-level constants (same for every coin)
     _sl_factor  = 1.0 - cfg.MOMENTUM_SL_PCT  / 100.0
     _tp1_factor = 1.0 + cfg.MOMENTUM_TP1_PCT / 100.0
@@ -1013,21 +1084,75 @@ def scan() -> list[MomentumResult]:
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "NO_DATA", "MEXC kline unavailable", 0.0, 0.0))
             continue
 
-        # FIX 4: macro gate = EMA stack only (KDJ no longer hard-blocks)
-        if not tech.macro_ok:
-            macro_blocked_count += 1
-            log.info(
-                f"  MACRO ✗  {symbol}: EMA bearish  "
-                f"({tech.h4_ema6:.4g}/{tech.h4_ema12:.4g}/{tech.h4_ema20:.4g})"
-            )
-            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "MACRO_BLOCKED", "4H EMA bearish", tech.vol_pct, tech.h4_kdj_j))
-            continue
+        squeeze_bypass = False
 
-        # GATE 2a: 15m EMA6 > EMA12 (new hard gate)
-        if not tech.m15_ema6_gt_ema12:
+        # ── Gate 2g: BB-Squeeze Bypass — runs BEFORE Stage 2a (CHANGE 2B) ─────
+        if not tech.macro_ok:
+            ema_spread_pct = abs(tech.h4_ema_sep)       # tech.h4_ema_sep stored as % value
+            ema6_gt_ema20  = tech.h4_ema6 > tech.h4_ema20
+            slope_flat     = abs(tech.h4_ema20_slope) < cfg.MOMENTUM_SQUEEZE_EMA_SLOPE_MAX
+            vol_breakout   = tech.m15_vol_spike_ratio >= cfg.MOMENTUM_SQUEEZE_VOL_MULT
+            px_breakout    = tech.m15_price_gt_h4_ema20
+            compressed     = ema_spread_pct < cfg.MOMENTUM_SQUEEZE_EMA_SPREAD_MAX
+
+            if compressed and slope_flat and vol_breakout and px_breakout and ema6_gt_ema20:
+                squeeze_bypass = True
+                tech.macro_ok  = True
+                _s2a_squeeze  += 1
+                log.info(
+                    f"  💥 SQUEEZE 2g  {symbol}: spread {ema_spread_pct:.2f}%  "
+                    f"slope {tech.h4_ema20_slope:+.2f}%  vol {tech.m15_vol_spike_ratio:.1f}×  "
+                    f"px_above_h4ema20={px_breakout} — bypassing Stage 2a"
+                )
+
+        # ── Stage 2a: 4H macro gate (EMA stack + separation) ──────────────────
+        if not tech.macro_ok:
+            h4_order_ok  = tech.h4_ema6 > tech.h4_ema12 > tech.h4_ema20
+            h4_ema6_gt20 = tech.h4_ema6 > tech.h4_ema20
+
+            # CHANGE 2A: Fear Mode relaxation (F&G < 45)
+            if _fear_mode:
+                fear_sep_ok = h4_order_ok and (tech.h4_ema_sep >= cfg.MOMENTUM_FEAR_EMA_SEP_MIN)
+                rs_vs_btc   = change_24h - _btc_24h_change
+                rs_bypass   = h4_ema6_gt20 and rs_vs_btc >= cfg.MOMENTUM_FEAR_RS_PCT
+                if fear_sep_ok or rs_bypass:
+                    tech.macro_ok = True
+                    _s2a_fear_bypassed += 1
+                    reason = (f"sep {tech.h4_ema_sep:.3f}% ≥ {cfg.MOMENTUM_FEAR_EMA_SEP_MIN}%"
+                              if fear_sep_ok else f"RS vs BTC {rs_vs_btc:+.1f}%")
+                    log.info(f"  😟 FEAR bypass  {symbol}: {reason}")
+
+            if not tech.macro_ok:
+                macro_blocked_count += 1
+                if not h4_order_ok:
+                    _s2a_ema_bearish += 1
+                    log.info(
+                        f"  MACRO ✗  {symbol}: EMA bearish  "
+                        f"({tech.h4_ema6:.4g}/{tech.h4_ema12:.4g}/{tech.h4_ema20:.4g})"
+                    )
+                    _last_scan_outcomes.append(CandidateOutcome(
+                        symbol, change_1h, 0, "MACRO_BLOCKED", "4H EMA bearish",
+                        tech.vol_pct, tech.h4_kdj_j))
+                else:
+                    _s2a_sep_small += 1
+                    log.info(
+                        f"  MACRO ✗  {symbol}: EMA sep {tech.h4_ema_sep:.3f}% "
+                        f"< {cfg.MOMENTUM_TA_H4_EMA_SEP_MIN * 100:.1f}%"
+                    )
+                    _last_scan_outcomes.append(CandidateOutcome(
+                        symbol, change_1h, 0, "MACRO_BLOCKED",
+                        f"EMA sep {tech.h4_ema_sep:.3f}% too small",
+                        tech.vol_pct, tech.h4_kdj_j))
+                continue
+
+        # ── GATE 2a: 15m EMA6 > EMA12 (hard gate) ─────────────────────────────
+        if not tech.m15_ema6_gt_ema12 and not squeeze_bypass:
+            _s2a_15m_gate += 1
             macro_blocked_count += 1
             log.info(f"  15m EMA ✗  {symbol}: EMA6 {tech.m15_ema6:.4g} < EMA12 {tech.m15_ema12:.4g}")
-            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "MACRO_BLOCKED", "15m EMA6 < EMA12", tech.vol_pct, tech.h4_kdj_j))
+            _last_scan_outcomes.append(CandidateOutcome(
+                symbol, change_1h, 0, "MACRO_BLOCKED", "15m EMA6 < EMA12",
+                tech.vol_pct, tech.h4_kdj_j))
             continue
 
         # FIX 4: dead-zone blocker — very low volume AND low momentum = skip
@@ -1150,7 +1275,26 @@ def scan() -> list[MomentumResult]:
             infinite_supply = _inf_supply_map.get(symbol, False),
             ath_dist_pct    = round(tech.ath_dist_pct, 1),
             m5_note         = tech.m5_note,
+            squeeze_bypass  = squeeze_bypass,
         ))
+
+    # Stage 2a block breakdown log (CHANGE 2C)
+    log.info(
+        f"Stage 2a stats: "
+        f"EMA-bearish={_s2a_ema_bearish} | Sep-small={_s2a_sep_small} | "
+        f"15m-gate={_s2a_15m_gate} | FearMode-bypass={_s2a_fear_bypassed} | "
+        f"Squeeze-bypass={_s2a_squeeze}"
+        + (f" | 😟 FEAR MODE ACTIVE (F&G {_fg_value})" if _fear_mode else "")
+    )
+
+    # Expose Stage 2a counters for stats_tracker (CHANGE 2C)
+    global _last_s2a_ema_bearish, _last_s2a_sep_small, _last_s2a_15m_gate
+    global _last_s2a_fear_bypassed, _last_s2a_squeeze
+    _last_s2a_ema_bearish   = _s2a_ema_bearish
+    _last_s2a_sep_small     = _s2a_sep_small
+    _last_s2a_15m_gate      = _s2a_15m_gate
+    _last_s2a_fear_bypassed = _s2a_fear_bypassed
+    _last_s2a_squeeze       = _s2a_squeeze
 
     # Sort best-first
     scored.sort(key=lambda r: r.total_score, reverse=True)

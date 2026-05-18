@@ -52,6 +52,15 @@ class DailyStats:
     top_coins:      list       = field(default_factory=list)  # [(symbol, score, emoji), ...]
     top_results:    list       = field(default_factory=list)  # up to 3 best MomentumResult objects
 
+    # Stage 2a block breakdown (CHANGE 2C)
+    s2a_ema_bearish:   int  = 0
+    s2a_sep_small:     int  = 0
+    s2a_15m_gate:      int  = 0
+    s2a_fear_bypassed: int  = 0
+    s2a_squeeze:       int  = 0
+    fear_mode_active:  bool = False
+    fear_greed_value:  int  = 50
+
 
 @dataclass
 class ScanSnapshot:
@@ -82,7 +91,10 @@ class StatsTracker:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def record_scan(self, results: list, m1m7_count: int, macro_blocked: int = 0, outcomes: list = None) -> None:
+    def record_scan(self, results: list, m1m7_count: int, macro_blocked: int = 0, outcomes: list = None,
+                    s2a_ema_bearish: int = 0, s2a_sep_small: int = 0, s2a_15m_gate: int = 0,
+                    s2a_fear_bypassed: int = 0, s2a_squeeze: int = 0,
+                    fear_mode_active: bool = False, fear_greed_value: int = 50) -> None:
         """
         Call after every successful m5.scan().
         results       — list[MomentumResult] returned by scan()
@@ -97,6 +109,14 @@ class StatsTracker:
             s.coins_analyzed += m1m7_count
             s.macro_blocked  += macro_blocked
             s.last_scan_ts    = now_str
+            # Stage 2a block breakdown
+            s.s2a_ema_bearish   += s2a_ema_bearish
+            s.s2a_sep_small     += s2a_sep_small
+            s.s2a_15m_gate      += s2a_15m_gate
+            s.s2a_fear_bypassed += s2a_fear_bypassed
+            s.s2a_squeeze       += s2a_squeeze
+            s.fear_mode_active   = fear_mode_active
+            s.fear_greed_value   = fear_greed_value
 
             snapshot: list[str] = []
             for r in results:
@@ -200,8 +220,15 @@ class StatsTracker:
 
             next_min = _minutes_to_next_scan()
 
+            fear_banner = (
+                f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — "
+                f"Stage 2a relaxed to 0.05% sep\n"
+                if s.fear_mode_active else ""
+            )
+
             if not s.scan_count:
                 return (
+                    fear_banner +
                     "No scans completed today yet.\n"
                     f"Next scan in <b>{next_min} min</b>."
                 )
@@ -209,11 +236,17 @@ class StatsTracker:
             total_alerts = (s.entry_alerts + s.watch_alerts + s.early_alerts +
                             s.gc_alerts + s.vs_alerts + s.rb_alerts +
                             s.pbw_alerts + s.sc_alerts)
-            lines = [
+            lines = []
+            if s.fear_mode_active:
+                lines.append(f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — Stage 2a relaxed to 0.05% sep")
+            lines += [
                 f"Last scan: <b>{s.last_scan_ts}</b> Berlin  |  Next in <b>{next_min} min</b>",
                 f"Scans today: <b>{s.scan_count}</b>",
                 "",
                 f"M1–M7 passed: <b>{s.coins_analyzed}</b>  |  4H blocked: <b>{s.macro_blocked}</b>",
+                f"  └ EMA bearish: {s.s2a_ema_bearish} | Sep &lt;0.2%: {s.s2a_sep_small} | "
+                f"15m gate: {s.s2a_15m_gate} | Fear bypass: {s.s2a_fear_bypassed} | "
+                f"Squeeze: {s.s2a_squeeze}",
                 f"Alerts sent: <b>{total_alerts}</b>  "
                 f"(Entry: {s.entry_alerts} | Watch: {s.watch_alerts} | Early: {s.early_alerts} "
                 f"| GC: {s.gc_alerts} | VS: {s.vs_alerts} | RB: {s.rb_alerts} "

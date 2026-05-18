@@ -319,6 +319,16 @@ MOMENTUM_SC_SL_PCT          = 5.0
 MOMENTUM_SC_TP1_PCT         = 8.0
 MOMENTUM_SC_TP2_PCT         = 15.0
 
+# ─── Fear Mode — Bear Market Relief (CHANGE 2A) ──────────────────────────────
+MOMENTUM_FEAR_FG_THRESHOLD    = 45     # F&G below this activates Fear Mode
+MOMENTUM_FEAR_EMA_SEP_MIN     = 0.05   # relaxed sep % (normal = 0.2%) compared vs tech.h4_ema_sep
+MOMENTUM_FEAR_RS_PCT          = 3.0    # relative strength vs BTC needed for EMA6>EMA20 bypass
+
+# ─── BB-Squeeze Bypass — Gate 2g (CHANGE 2B) ─────────────────────────────────
+MOMENTUM_SQUEEZE_EMA_SPREAD_MAX = 3.0  # abs spread between 4H EMA6 and EMA20 < 3% (compressed)
+MOMENTUM_SQUEEZE_EMA_SLOPE_MAX  = 0.5  # 4H EMA20 slope over 5 candles < 0.5% (flat)
+MOMENTUM_SQUEEZE_VOL_MULT       = 5.0  # 15m vol ≥ 5× avg prev-3 (breakout vol)
+
 # ─── Alert logging (FIX 6) ───────────────────────────────────────────────────
 ALERT_LOG_CSV = "logs/alert_log.csv"
 
