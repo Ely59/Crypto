@@ -730,47 +730,52 @@ def _generate_warnings(tech: TechResult, change_1h: float,
 # Main scan
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _check_1m_pbw(mexc_symbol: str) -> "dict | None":
+def _check_5m_pbw(mexc_symbol: str, fear_mode: bool = False) -> "dict | None":
     """
-    Check 1m candles for Pre-Breakout Watch conditions.
+    Check 5m candles for Pre-Breakout Watch conditions.
     Returns a dict with computed values, or None if data unavailable.
     """
-    df_1m = get_mexc_futures_klines(mexc_symbol, "1m", limit=100)
-    if df_1m is None or len(df_1m) < 20:
+    df_5m = get_mexc_futures_klines(mexc_symbol, "5m", limit=100)
+    if df_5m is None or len(df_5m) < 20:
         return None
 
-    close_1m = df_1m["close"]
-    ema6_s   = compute_ema(close_1m, 6)
-    ema20_s  = compute_ema(close_1m, 20)
-    m1_ema6  = float(ema6_s.iloc[-1])
-    m1_ema20 = float(ema20_s.iloc[-1])
-    ema_spread = (abs(m1_ema6 - m1_ema20) / m1_ema20 * 100.0) if m1_ema20 > 0 else 999.0
+    close_5m = df_5m["close"]
+    ema6_s   = compute_ema(close_5m, 6)
+    ema20_s  = compute_ema(close_5m, 20)
+    m5_ema6  = float(ema6_s.iloc[-1])
+    m5_ema20 = float(ema20_s.iloc[-1])
+    ema_spread = (abs(m5_ema6 - m5_ema20) / m5_ema20 * 100.0) if m5_ema20 > 0 else 999.0
 
-    rsi_s = compute_rsi(close_1m, period=6)
+    rsi_s = compute_rsi(close_5m, period=6)
     if len(rsi_s) < cfg.MOMENTUM_PBW_RSI_CANDLES:
         return None
 
-    # Count consecutive recent candles with RSI < threshold
+    rsi_threshold = cfg.MOMENTUM_PBW_RSI_MAX_FEAR if fear_mode else cfg.MOMENTUM_PBW_RSI_MAX
+    latest_rsi    = float(rsi_s.iloc[-1])
+
+    # Count consecutive recent candles with RSI < streak threshold
     streak = 0
     for i in range(1, len(rsi_s) + 1):
-        if float(rsi_s.iloc[-i]) < cfg.MOMENTUM_PBW_RSI_MAX:
+        if float(rsi_s.iloc[-i]) < rsi_threshold:
             streak += 1
         else:
             break
 
-    vol_s    = df_1m["volume"]
+    vol_s    = df_5m["volume"]
     vol_last = float(vol_s.iloc[-1])
     vol_ma10 = float(vol_s.rolling(10).mean().iloc[-1])
     vol_ratio = vol_last / vol_ma10 if vol_ma10 > 0 else 0.0
 
     return {
-        "ema_spread":  round(ema_spread, 3),
-        "compressed":  ema_spread < cfg.MOMENTUM_PBW_EMA_SPREAD_MAX,
-        "rsi_streak":  streak,
-        "rsi_ok":      streak >= cfg.MOMENTUM_PBW_RSI_CANDLES,
-        "vol_ratio":   round(vol_ratio, 2),
-        "trigger_vol": vol_ratio >= cfg.MOMENTUM_PBW_VOL_MULT,
-        "trigger_px":  float(close_1m.iloc[-1]) > m1_ema20,
+        "ema_spread":   round(ema_spread, 3),
+        "compressed":   ema_spread < cfg.MOMENTUM_PBW_EMA_SPREAD_MAX,
+        "rsi_streak":   streak,
+        "rsi_ok":       streak >= cfg.MOMENTUM_PBW_RSI_CANDLES,
+        "latest_rsi":   round(latest_rsi, 1),
+        "trigger_rsi":  latest_rsi < cfg.MOMENTUM_PBW_TRIGGER_RSI_MAX,
+        "vol_ratio":    round(vol_ratio, 2),
+        "trigger_vol":  vol_ratio >= cfg.MOMENTUM_PBW_VOL_MULT,
+        "trigger_px":   float(close_5m.iloc[-1]) > m5_ema20,
     }
 
 
@@ -1671,17 +1676,25 @@ def scan() -> list[MomentumResult]:
         h16d_high    = float(df_4h["high"].max())
         ath_dist_pct = (h16d_high - price) / h16d_high * 100 if h16d_high > 0 else 0.0
 
-        pbw = _check_1m_pbw(mexc_symbol)
+        pbw = _check_5m_pbw(mexc_symbol, fear_mode=_fear_mode)
         if pbw is None:
+            log.info(f"  PBW diag {symbol}: 5m data unavailable")
             continue
+        log.info(
+            f"  PBW diag {symbol} — "
+            f"RSI consec count: {pbw['rsi_streak']}/{cfg.MOMENTUM_PBW_RSI_CANDLES} | "
+            f"EMA spread: {pbw['ema_spread']:.3f}% (need <{cfg.MOMENTUM_PBW_EMA_SPREAD_MAX}%) | "
+            f"vol trigger: {pbw['vol_ratio']:.2f}× (need >{cfg.MOMENTUM_PBW_VOL_MULT}×) | "
+            f"RSI trigger: {pbw['latest_rsi']:.1f} (need <{cfg.MOMENTUM_PBW_TRIGGER_RSI_MAX}) | "
+            f"px_above_ema: {pbw['trigger_px']}"
+        )
         if not pbw["compressed"]:
-            log.debug(f"  PBW skip {symbol}: EMA spread {pbw['ema_spread']:.3f}% ≥ {cfg.MOMENTUM_PBW_EMA_SPREAD_MAX}%")
             continue
         if not pbw["rsi_ok"]:
-            log.debug(f"  PBW skip {symbol}: RSI streak {pbw['rsi_streak']} < {cfg.MOMENTUM_PBW_RSI_CANDLES} candles")
+            continue
+        if not pbw["trigger_rsi"]:
             continue
         if not (pbw["trigger_vol"] and pbw["trigger_px"]):
-            log.debug(f"  PBW skip {symbol}: trigger not met (vol {pbw['vol_ratio']:.1f}×, px_above_ema={pbw['trigger_px']})")
             continue
 
         fund     = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
@@ -1763,22 +1776,39 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  SC skip {symbol}: 4H EMA bearish")
             continue
 
-        # Consolidation checks
-        if tech.vol_pct >= cfg.MOMENTUM_SC_VOL_MAX * 100:
-            log.debug(f"  SC skip {symbol}: vol {tech.vol_pct:.0f}% ≥ {cfg.MOMENTUM_SC_VOL_MAX*100:.0f}% (not low enough)")
-            continue
-        if tech.m15_rsi6 >= cfg.MOMENTUM_SC_RSI_MAX:
-            log.debug(f"  SC skip {symbol}: RSI {tech.m15_rsi6:.1f} ≥ {cfg.MOMENTUM_SC_RSI_MAX} (not cooled)")
-            continue
-        if tech.m15_kdj_j >= cfg.MOMENTUM_SC_KDJ_MAX:
-            log.debug(f"  SC skip {symbol}: KDJ J {tech.m15_kdj_j:.1f} ≥ {cfg.MOMENTUM_SC_KDJ_MAX} (not reset)")
-            continue
-
-        # Prior move: 24H high must be ≥8% above current price (confirms previous leg)
+        # Consolidation checks — apply fear-mode overrides, log diagnostics, then filter
         current       = tech.m15_price
-        prior_move_ok = tech.h24_high >= current * (1.0 + cfg.MOMENTUM_SC_PRIOR_MOVE_MIN / 100.0)
         prior_move_pct = (tech.h24_high - current) / current * 100 if current > 0 else 0.0
 
+        sc_vol_limit = cfg.MOMENTUM_SC_VOL_MAX_FEAR if _fear_mode else cfg.MOMENTUM_SC_VOL_MAX
+        sc_rsi_limit = cfg.MOMENTUM_SC_RSI_MAX_FEAR if _fear_mode else cfg.MOMENTUM_SC_RSI_MAX
+
+        log.info(
+            f"  SC diag {symbol} — "
+            f"vol%MA10: {tech.vol_pct:.0f}% (need <{sc_vol_limit*100:.0f}%) | "
+            f"RSI6: {tech.m15_rsi6:.1f} (need <{sc_rsi_limit}) | "
+            f"KDJ J: {tech.m15_kdj_j:.1f} (need <{cfg.MOMENTUM_SC_KDJ_MAX}, strict<{cfg.MOMENTUM_SC_KDJ_STRICT}) | "
+            f"prior move: {prior_move_pct:.1f}% (need ≥{cfg.MOMENTUM_SC_PRIOR_MOVE_MIN}%)"
+        )
+
+        if tech.vol_pct >= sc_vol_limit * 100:
+            continue
+        if tech.m15_rsi6 >= sc_rsi_limit:
+            continue
+        if tech.m15_kdj_j >= cfg.MOMENTUM_SC_KDJ_MAX:
+            continue
+
+        # EITHER gate: RSI < strict threshold OR KDJ J < strict threshold
+        either_ok = (tech.m15_rsi6 < cfg.MOMENTUM_SC_RSI_STRICT) or (tech.m15_kdj_j < cfg.MOMENTUM_SC_KDJ_STRICT)
+        if not either_ok:
+            log.debug(
+                f"  SC skip {symbol}: neither RSI {tech.m15_rsi6:.1f}<{cfg.MOMENTUM_SC_RSI_STRICT}"
+                f" nor KDJ {tech.m15_kdj_j:.1f}<{cfg.MOMENTUM_SC_KDJ_STRICT}"
+            )
+            continue
+
+        # Prior move: 24H high must be ≥6% above current price (confirms previous leg)
+        prior_move_ok = tech.h24_high >= current * (1.0 + cfg.MOMENTUM_SC_PRIOR_MOVE_MIN / 100.0)
         if not prior_move_ok:
             log.debug(f"  SC skip {symbol}: 24H high only {prior_move_pct:.1f}% above current (need {cfg.MOMENTUM_SC_PRIOR_MOVE_MIN}%)")
             continue
@@ -1808,6 +1838,7 @@ def scan() -> list[MomentumResult]:
             f"  🪜 STAIRCASE  {symbol}  1h {change_1h:+.2f}%  "
             f"Vol {tech.vol_pct:.0f}%  RSI {tech.m15_rsi6:.1f}  KDJ {tech.m15_kdj_j:.1f}  "
             f"prior +{prior_move_pct:.1f}%"
+            + (" [fear-mode]" if _fear_mode else "")
         )
         _mark_sc_alerted(symbol)
         _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, fund.total, "SC", "STAIRCASE", tech.vol_pct, tech.h4_kdj_j))

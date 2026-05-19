@@ -298,23 +298,29 @@ MOMENTUM_ATH_DIST_L1_PTS = 3
 MOMENTUM_ATH_DIST_L2_PTS = 5
 
 # ─── Pre-Breakout Watch signal (FIX 5) ───────────────────────────────────────
-MOMENTUM_PBW_1H_MIN         = 1.0    # min 1H gain for PBW candidates
-MOMENTUM_PBW_1H_MAX         = 8.0    # max 1H gain for PBW candidates
-MOMENTUM_PBW_EMA_SPREAD_MAX = 0.1    # 1m EMA6/EMA20 spread must be < 0.1% (compression)
-MOMENTUM_PBW_RSI_MAX        = 45.0   # 1m RSI6 must be < 45
-MOMENTUM_PBW_RSI_CANDLES    = 8      # consecutive candles with RSI < threshold
-MOMENTUM_PBW_VOL_MULT       = 1.5    # trigger: 1m vol > 1.5× MA10
-MOMENTUM_PBW_SL_PCT         = 5.0
-MOMENTUM_PBW_TP1_PCT        = 8.0
-MOMENTUM_PBW_TP2_PCT        = 15.0
+MOMENTUM_PBW_1H_MIN            = 1.0    # min 1H gain for PBW candidates
+MOMENTUM_PBW_1H_MAX            = 8.0    # max 1H gain for PBW candidates
+MOMENTUM_PBW_EMA_SPREAD_MAX    = 0.15   # 5m EMA6/EMA20 spread must be < 0.15% (compression)
+MOMENTUM_PBW_RSI_MAX           = 52.0   # 5m RSI6 must be < 52 (base streak threshold)
+MOMENTUM_PBW_RSI_CANDLES       = 5      # consecutive 5m candles with RSI < threshold
+MOMENTUM_PBW_VOL_MULT          = 1.5    # trigger: 5m vol > 1.5× MA10
+MOMENTUM_PBW_TRIGGER_RSI_MAX   = 68.0   # trigger candle RSI6 must be < 68 (not overbought)
+MOMENTUM_PBW_RSI_MAX_FEAR      = 58.0   # Fear Mode: relax streak RSI threshold to 58
+MOMENTUM_PBW_SL_PCT            = 5.0
+MOMENTUM_PBW_TP1_PCT           = 8.0
+MOMENTUM_PBW_TP2_PCT           = 15.0
 
 # ─── Staircase Continuation signal (FIX 7) ───────────────────────────────────
 MOMENTUM_SC_1H_MIN          = -2.0   # min 1H gain (flat/slight dip = consolidation)
 MOMENTUM_SC_1H_MAX          = 4.0    # max 1H gain
-MOMENTUM_SC_VOL_MAX         = 0.20   # 15m vol must be < 20% of MA10 (very low)
-MOMENTUM_SC_RSI_MAX         = 45.0   # 15m RSI6 must be < 45 (cooled)
-MOMENTUM_SC_KDJ_MAX         = 40.0   # 15m KDJ J must be < 40 (fully reset)
-MOMENTUM_SC_PRIOR_MOVE_MIN  = 8.0    # 24H high must be ≥8% above current (prior leg)
+MOMENTUM_SC_VOL_MAX         = 0.35   # 15m vol must be < 35% of MA10
+MOMENTUM_SC_RSI_MAX         = 55.0   # 15m RSI6 must be < 55
+MOMENTUM_SC_RSI_STRICT      = 45.0   # EITHER gate: RSI < 45 alone satisfies consolidation
+MOMENTUM_SC_KDJ_MAX         = 50.0   # 15m KDJ J must be < 50
+MOMENTUM_SC_KDJ_STRICT      = 35.0   # EITHER gate: KDJ J < 35 alone satisfies consolidation
+MOMENTUM_SC_PRIOR_MOVE_MIN  = 6.0    # 24H high must be ≥6% above current (prior leg)
+MOMENTUM_SC_RSI_MAX_FEAR    = 62.0   # Fear Mode: relax RSI threshold to 62
+MOMENTUM_SC_VOL_MAX_FEAR    = 0.45   # Fear Mode: relax vol threshold to 45%
 MOMENTUM_SC_SL_PCT          = 5.0
 MOMENTUM_SC_TP1_PCT         = 8.0
 MOMENTUM_SC_TP2_PCT         = 15.0
