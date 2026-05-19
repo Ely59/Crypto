@@ -203,11 +203,17 @@ def _signal_chain_lines(coin) -> list[str]:
     else:
         m5_line = "5m:  ⚫ n/v"
 
-    # Entry zone
-    ep    = coin.entry_price
-    ez_lo = ep * (1 - cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
-    ez_hi = ep * (1 + cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
-    zone_line = f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
+    # Entry zone — use 5m EMA20 when available (CHANGE 6C), else fall back to entry_price
+    ez_base = t.m5_ema20 if t.m5_ema20 > 0 else coin.entry_price
+    ez_lo   = ez_base * (1 - cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
+    ez_hi   = ez_base * (1 + cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
+    if t.m5_ema20 > 0:
+        zone_line = (
+            f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
+            f" (5m EMA20 ± {cfg.MOMENTUM_ENTRY_ZONE_PCT:.1f}% — verify on 1m before entry)"
+        )
+    else:
+        zone_line = f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
 
     return ["", h4_line, m15_line, m5_line, zone_line, ""]
 

@@ -218,6 +218,7 @@ class TechResult:
     m5_ema6_gt_ema12:     bool  = False
     m5_first_green:       bool  = False
     m5_vol_pct:           float = 0.0
+    m5_ema20:             float = 0.0    # 5m EMA20 price — used for entry zone (CHANGE 6C)
     m5_ok:                bool  = False
     m5_note:              str   = ""
 
@@ -862,6 +863,7 @@ def _check_5m(mexc_symbol: str) -> "dict | None":
         "ema6_gt_ema12":      m5_ema6 > m5_ema12,
         "first_green":        m5_price > m5_open_last,
         "vol_pct":            round(m5_vol_pct, 1),
+        "ema20":              m5_ema20,   # raw float for entry zone (CHANGE 6C)
     }
 
 
@@ -886,6 +888,7 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
     tech.m5_ema6_gt_ema12     = m5["ema6_gt_ema12"]
     tech.m5_first_green       = m5["first_green"]
     tech.m5_vol_pct           = m5["vol_pct"]
+    tech.m5_ema20             = m5.get("ema20", 0.0)
     # Evaluate 5m overall health
     if m5["rsi6"] > cfg.MOMENTUM_5M_RSI_HOT:
         tech.m5_ok   = False
@@ -1471,7 +1474,7 @@ def scan() -> list[MomentumResult]:
         _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
         gc_5m_warn = []
         if tech.m5_rsi6 > 0:
-            if not (40 <= tech.m5_rsi6 <= 72):
+            if not (35 <= tech.m5_rsi6 <= 72):
                 gc_5m_warn.append(f"⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
             if not tech.m5_price_above_ema20:
                 gc_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
@@ -1961,6 +1964,12 @@ def scan() -> list[MomentumResult]:
 
         has_inf = _inf_supply_map.get(symbol, False)
         sq_warnings: list[str] = []
+        # 5m KDJ J > 50 confirmation (CHANGE 6B-SQ): warn if momentum not yet confirmed
+        if sq_tech.m5_kdj_j > 0 and sq_tech.m5_kdj_j < 50:
+            sq_warnings.append(
+                f"⚠️ 5m KDJ J {sq_tech.m5_kdj_j:.0f} < 50 — momentum building, "
+                "wait for 5m confirmation before entry"
+            )
         if symbol in _micro_cap_set:
             sq_warnings.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
             sq_warnings.append("⚠️ Treat as high-risk, max 50% normal margin")
