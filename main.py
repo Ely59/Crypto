@@ -367,8 +367,9 @@ async def _command_poll_async() -> None:
                     await _reply(chat_id, m4.build_coins_message(history))
                     log.info("/coins replied.")
                 elif text.startswith("/top"):
-                    top = tracker.get_top_results()
-                    await _reply(chat_id, m4.build_top_message(top))
+                    top       = tracker.get_top_results()
+                    alert_log = m_log.get_recent_alerts(hours=24)
+                    await _reply(chat_id, m4.build_top_message(top, alert_log=alert_log))
                     log.info("/top replied.")
                 elif text.startswith("/best"):
                     top = tracker.get_top_results()

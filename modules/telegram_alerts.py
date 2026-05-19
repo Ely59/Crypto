@@ -191,24 +191,28 @@ def _signal_chain_lines(coin) -> list[str]:
     def ck(ok: bool) -> str:
         return "✅" if ok else "❌"
 
-    # 4H line
+    # 4H line — ✅ requires EMA stack AND RSI6 < 80
     macd_arrow = "↑" if t.h4_macd_ok else "↓"
     h4_rsi_str = f"RSI {t.h4_rsi6:.0f}" if t.h4_rsi6 > 0 else f"KDJ {t.h4_kdj_j:.0f}"
-    h4_line = f"4H:  {ck(t.h4_ema_ok)} EMA bullish | {h4_rsi_str} | MACD {macd_arrow}"
+    h4_rsi_ok  = t.h4_rsi6 <= 0 or t.h4_rsi6 < 80   # rsi6=0 → not computed, treat as ok
+    h4_ok      = t.h4_ema_ok and h4_rsi_ok
+    h4_line = f"4H:  {ck(h4_ok)} EMA bullish | {h4_rsi_str} | MACD {macd_arrow}"
     if not t.h4_ema_ok:
         h4_line = f"4H:  ❌ EMA bearish [{t.h4_ema6:.4g}/{t.h4_ema12:.4g}/{t.h4_ema20:.4g}]"
+    elif not h4_rsi_ok:
+        h4_line = f"4H:  ❌ EMA bullish | {h4_rsi_str} overheated | MACD {macd_arrow}"
 
-    # 15m line
+    # 15m line — ✅ requires EMA6>EMA12 AND RSI6 < 78
     ema_ok_15m = t.m15_ema6_gt_ema12 if t.m15_ema6_gt_ema12 is not None else t.m15_ema_ok
-    if ema_ok_15m and t.m15_rsi6 <= 72:
+    if ema_ok_15m and t.m15_rsi6 < 78:
         m15_line = f"15m: {ck(ema_ok_15m)} EMA bullish | RSI {t.m15_rsi6:.0f} | Vol {t.vol_pct:.0f}% MA10"
     else:
         concern = ""
         if not ema_ok_15m:
             concern = f" EMA6 < EMA12"
-        if t.m15_rsi6 > 72:
-            concern += f" RSI {t.m15_rsi6:.0f} — überhitzt"
-        m15_line = f"15m: {ck(ema_ok_15m)} {concern.strip() if concern else 'EMA bullish'} | RSI {t.m15_rsi6:.0f}"
+        if t.m15_rsi6 >= 78:
+            concern += f" RSI {t.m15_rsi6:.0f} — overheated"
+        m15_line = f"15m: {ck(ema_ok_15m and t.m15_rsi6 < 78)} {concern.strip() if concern else 'EMA bullish'} | RSI {t.m15_rsi6:.0f}"
 
     # 5m line
     if t.m5_rsi6 > 0:
@@ -229,12 +233,44 @@ def _signal_chain_lines(coin) -> list[str]:
     if t.m5_ema20 > 0:
         zone_line = (
             f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
-            f" (5m EMA20 ± {cfg.MOMENTUM_ENTRY_ZONE_PCT:.1f}% — verify on 1m before entry)"
+            f" (check 1m before placing order)"
         )
     else:
         zone_line = f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
 
     return ["", h4_line, m15_line, m5_line, zone_line, ""]
+
+
+def _build_warning_lines(coin, is_squeeze: bool = False) -> list[str]:
+    """
+    Assemble warning block in canonical order:
+    supply → dilution → overbought → 5m advisory → micro-cap → squeeze-specific.
+
+    coin.warnings already comes from _generate_warnings() in canonical order
+    (supply, dilution, overbought, micro-cap). We inject the 5m note between
+    overbought and micro-cap, then append the squeeze line when is_squeeze=True.
+    """
+    non_micro: list[str] = []
+    micro:     list[str] = []
+
+    for w in (coin.warnings or []):
+        if "Micro-Cap" in w or "high-risk" in w:
+            micro.append(w)
+        else:
+            non_micro.append(w)
+
+    lines: list[str] = [f"⚠️ {w}" for w in non_micro]
+
+    m5_note = getattr(coin, "m5_note", "") or (coin.tech.m5_note if coin.tech else "")
+    if m5_note:
+        lines.append(f"⚠️ {m5_note}")
+
+    lines += [f"⚠️ {w}" for w in micro]
+
+    if is_squeeze:
+        lines.append("⚡ Spike-type: TP1 priority, no greed — move is short and fast")
+
+    return lines
 
 
 def _fg_bar(score: int, blocks: int = 10) -> str:
@@ -1186,13 +1222,9 @@ def build_momentum_alert(coin) -> str:
         f"R/R: {coin.rr_str}",
     ]
 
-    all_warnings = list(coin.warnings)
-    if coin.m5_note and coin.m5_note not in all_warnings:
-        all_warnings.append(coin.m5_note)
-    if all_warnings:
-        lines += ["", "⚠️ <b>RISKS:</b>"]
-        for w in all_warnings:
-            lines.append(f"⚠️ {w}")
+    w_lines = _build_warning_lines(coin)
+    if w_lines:
+        lines += ["", "⚠️ <b>RISKS:</b>"] + w_lines
 
     mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
     lines += ["", f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>']
@@ -1348,9 +1380,7 @@ def build_volume_spike_alert(coin) -> str:
         lines.append(_vs_ath_l)
     lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
-    if coin.warnings:
-        for w in coin.warnings:
-            lines.append(f"⚠️ {w}")
+    lines += _build_warning_lines(coin)
 
     lines += [
         "",
@@ -1398,9 +1428,7 @@ def build_recovery_alert(coin) -> str:
         lines.append(_rb_ath_l)
     lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
-    if coin.warnings:
-        for w in coin.warnings:
-            lines.append(f"⚠️ {w}")
+    lines += _build_warning_lines(coin)
 
     lines += [
         "",
@@ -1449,9 +1477,7 @@ def build_golden_cross_alert(coin) -> str:
         lines.append(_gc_ath_l)
     lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
-    if coin.warnings:
-        for w in coin.warnings:
-            lines.append(f"⚠️ {w}")
+    lines += _build_warning_lines(coin)
 
     if t is not None and t.vol_pct < cfg.MOMENTUM_VOL_GC_WARN * 100:
         lines.append("⚠️ Low volume at cross — confirm with price action before entry")
@@ -1492,9 +1518,7 @@ def build_pbw_alert(coin) -> str:
         lines.append(_pbw_ath_l)
     lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
-    if coin.warnings:
-        for w in coin.warnings:
-            lines.append(f"⚠️ {w}")
+    lines += _build_warning_lines(coin)
 
     lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
     return "\n".join(lines)
@@ -1537,9 +1561,7 @@ def build_staircase_alert(coin) -> str:
         lines.append(_sc_ath_l)
     lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
-    if coin.warnings:
-        for w in coin.warnings:
-            lines.append(f"⚠️ {w}")
+    lines += _build_warning_lines(coin)
 
     lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
     return "\n".join(lines)
@@ -1596,9 +1618,7 @@ def build_squeeze_alert(coin) -> str:
         lines.append(_sq_ath_l)
     lines.append(f"MCap: {_vol_human(coin.market_cap)} | Compression: {compress_d} days")
 
-    if coin.warnings:
-        for w in coin.warnings:
-            lines.append(f"⚠️ {w}")
+    lines += _build_warning_lines(coin, is_squeeze=True)
 
     lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
     return "\n".join(lines)
@@ -1759,19 +1779,49 @@ def build_coins_message(scan_history: list) -> str:
     return "\n".join(lines)
 
 
-def build_top_message(top_results: list) -> str:
-    """/top — Today's top 3 scored coins (compact summary)."""
+def build_top_message(top_results: list, alert_log: list | None = None) -> str:
+    """/top — Today's top 3 scored coins with outcome from alert_log when available."""
     if not top_results:
         return "No scored coins today yet.\nBe patient — the first alert of the day usually appears by mid-morning."
 
+    log_by_sym: dict = {}
+    if alert_log:
+        for entry in alert_log:
+            sym = entry.get("coin", "")
+            if sym and sym not in log_by_sym:
+                log_by_sym[sym] = entry
+
     lines = ["🏆 <b>TODAY'S TOP SCORED COINS</b>", ""]
+    best_roi: float | None = None
+    best_coin: str = ""
+
     for i, r in enumerate(top_results, 1):
         lines += [
             f"{i}. {r.rec_emoji} <b>{r.symbol}</b> — {r.total_score}/100 ({r.recommendation})",
             f"   {r.change_1h:+.2f}% (1H)  |  Entry: {_usd(r.entry_price)}",
             f"   SL: {_usd(r.stop_loss)}  TP1: {_usd(r.tp1)}  TP2: {_usd(r.tp2)}",
-            "",
         ]
+        log_entry = log_by_sym.get(r.symbol)
+        if log_entry:
+            roi  = log_entry.get("roi_percent", "")
+            peak = log_entry.get("4h_max_price", "")
+            hit  = log_entry.get("hit", "")
+            if roi:
+                try:
+                    roi_f    = float(roi)
+                    hit_sym  = "✅" if hit and int(hit) == 1 else "❌"
+                    peak_str = f" | Peak {_usd(float(peak))}" if peak else ""
+                    lines.append(f"   Outcome: {roi_f:+.1f}%{peak_str} {hit_sym}")
+                    if best_roi is None or roi_f > best_roi:
+                        best_roi  = roi_f
+                        best_coin = r.symbol
+                except (ValueError, TypeError):
+                    pass
+        lines.append("")
+
+    if best_coin and best_roi is not None:
+        lines += [f"⭐ Best performer: <b>{best_coin}</b> ({best_roi:+.1f}%)", ""]
+
     return "\n".join(lines)
 
 

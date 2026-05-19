@@ -742,22 +742,21 @@ def _generate_warnings(tech: TechResult, change_1h: float,
                         has_inf_supply: bool = False,
                         is_micro_cap: bool = False,
                         mcap: float = 0.0) -> list[str]:
-    """Generate up to 5 warnings (mandatory checks + optional risk flags)."""
-    mandatory: list[str] = []
+    """Generate warnings in canonical order: supply → dilution → overbought → micro-cap."""
+    supply:    list[str] = []
+    dilution:  list[str] = []
     optional:  list[str] = []
+    micro_cap: list[str] = []
 
-    # Mandatory: always shown when condition met
-    if is_micro_cap:
-        mandatory.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
-        mandatory.append("⚠️ Treat as high-risk, max 50% normal margin")
+    # 1. Supply
     if has_inf_supply:
-        mandatory.append("⚠️ Max Supply unknown — inflation risk")
+        supply.append("Max Supply unknown — inflation risk")
+    # 2. Dilution
     if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
-        mandatory.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+        dilution.append(f"Circ Rate: {circ_pct:.0f}% — dilution risk")
     if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
-        mandatory.append(f"FDV/MCap: {fdv_ratio:.1f}×")
-
-    # Optional: technical risk flags
+        dilution.append(f"FDV/MCap: {fdv_ratio:.1f}×")
+    # 3. Overbought / technical risk
     if tech.h4_kdj_j >= cfg.MOMENTUM_TA_H4_KDJ_J_MAX:
         optional.append(f"4H KDJ {tech.h4_kdj_j:.0f} — overheated, watch for reversal")
     if tech.m15_rsi6 > cfg.MOMENTUM_WARN_RSI6_PCT:
@@ -768,8 +767,12 @@ def _generate_warnings(tech: TechResult, change_1h: float,
         optional.append("Late in momentum cycle")
     if tech.vol_pct < cfg.MOMENTUM_WARN_VOL_LOW_PCT:
         optional.append("Volume not exceptional")
+    # 4. Micro-cap (always last)
+    if is_micro_cap:
+        micro_cap.append(f"Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+        micro_cap.append("Treat as high-risk, max 50% normal margin")
 
-    return mandatory + optional[:2]
+    return supply + dilution + optional[:2] + micro_cap
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -876,8 +879,10 @@ def _price_decimals(price: float) -> int:
         return 4
     elif price >= 0.01:
         return 5
-    else:
+    elif price >= 0.001:
         return 6
+    else:
+        return 7
 
 
 def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
@@ -892,13 +897,16 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
     tech.m5_first_green       = m5["first_green"]
     tech.m5_vol_pct           = m5["vol_pct"]
     tech.m5_ema20             = m5.get("ema20", 0.0)
-    # Evaluate 5m overall health
-    if m5["rsi6"] > cfg.MOMENTUM_5M_RSI_HOT:
+    # Evaluate 5m overall health — all three required for ✅
+    if m5["rsi6"] >= cfg.MOMENTUM_5M_RSI_HOT:
         tech.m5_ok   = False
-        tech.m5_note = f"⏳ 5m überhitzt (RSI {m5['rsi6']:.0f}) — auf Pullback warten"
+        tech.m5_note = f"⏳ 5m overheated (RSI {m5['rsi6']:.0f}) — wait for pullback"
+    elif not m5["kdj_rising"]:
+        tech.m5_ok   = False
+        tech.m5_note = "5m KDJ not rising — wait for entry zone"
     elif not m5["price_above_ema20"]:
         tech.m5_ok   = False
-        tech.m5_note = "⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position"
+        tech.m5_note = "5m price below EMA20 — wait for entry zone"
     else:
         tech.m5_ok   = True
         tech.m5_note = ""

@@ -239,7 +239,7 @@ MOMENTUM_TA_15M_LIMIT     = 60     # 15m candles (≈ 15 hours of data)
 MOMENTUM_TA_5M_LIMIT          = 60     # 60 × 5m = 5 hours of data for precision layer
 
 # ─── 5m precision layer thresholds ──────────────────────────────────────────
-MOMENTUM_5M_RSI_HOT           = 80.0   # 5m RSI above → overheated (soft gate, downgrade STRONG→WATCH)
+MOMENTUM_5M_RSI_HOT           = 75.0   # 5m RSI above → overheated (soft gate, downgrade STRONG→WATCH)
 MOMENTUM_5M_KDJ_MAX_PBW       = 30.0   # PBW: 5m KDJ J < 30 during accumulation
 MOMENTUM_5M_RSI_MAX_PBW       = 45.0   # PBW: 5m RSI6 < 45 confirmed
 MOMENTUM_5M_VOL_MAX_SC        = 0.25   # SC: 5m vol < 25% of MA10
