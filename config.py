@@ -329,6 +329,29 @@ MOMENTUM_SQUEEZE_EMA_SPREAD_MAX = 3.0  # abs spread between 4H EMA6 and EMA20 < 
 MOMENTUM_SQUEEZE_EMA_SLOPE_MAX  = 0.5  # 4H EMA20 slope over 5 candles < 0.5% (flat)
 MOMENTUM_SQUEEZE_VOL_MULT       = 5.0  # 15m vol ≥ 5× avg prev-3 (breakout vol)
 
+# ─── BB-Squeeze Breakout signal (PART 3) ──────────────────────────────────────
+MOMENTUM_SQ_15M_RSI_MIN     = 30.0        # 15m RSI6 ≥ 30 (not oversold when signal fires)
+MOMENTUM_SQ_15M_RSI_MAX     = 75.0        # 15m RSI6 ≤ 75 (not yet overbought)
+MOMENTUM_SQ_1H_MIN          = 1.0         # min 1H gain for SQ candidates
+MOMENTUM_SQ_1H_MAX          = 20.0        # max 1H gain (wider — squeeze moves fast)
+MOMENTUM_SQ_COOLDOWN_MIN    = 1440        # 24H cooldown — one alert per move
+MOMENTUM_SQ_MIN_SCORE       = 65          # minimum score to fire alert
+MOMENTUM_SQ_BASE_SCORE      = 70          # starting score
+MOMENTUM_SQ_VOL_EXTREME     = 10.0        # 15m vol ≥ 10× → extreme vol bonus
+MOMENTUM_SQ_VOL_EXTREME_PTS = 10          # +10 pts for extreme vol spike
+MOMENTUM_SQ_ATH_DIST_BONUS  = 80.0        # ATH distance > 80% below 16D peak → distance bonus
+MOMENTUM_SQ_ATH_DIST_PTS    = 5           # +5 pts
+MOMENTUM_SQ_CIRC_BONUS_PCT  = 99.9        # circ ≥ ~100% → fully circulating bonus
+MOMENTUM_SQ_CIRC_BONUS_PTS  = 5           # +5 pts
+MOMENTUM_SQ_MCAP_BONUS_USD  = 50_000_000  # MCap > $50M → size-credibility bonus
+MOMENTUM_SQ_MCAP_BONUS_PTS  = 5           # +5 pts
+MOMENTUM_SQ_INF_SUPPLY_PEN  = 10          # unknown max supply penalty magnitude (subtracted)
+MOMENTUM_SQ_CIRC_LOW_PCT    = 60.0        # circ < 60% → low circ penalty
+MOMENTUM_SQ_CIRC_LOW_PEN    = 5           # penalty magnitude (subtracted)
+MOMENTUM_SQ_SL_PCT          = 5.0
+MOMENTUM_SQ_TP1_PCT         = 8.0
+MOMENTUM_SQ_TP2_PCT         = 15.0
+
 # ─── Alert logging (FIX 6) ───────────────────────────────────────────────────
 ALERT_LOG_CSV = "logs/alert_log.csv"
 

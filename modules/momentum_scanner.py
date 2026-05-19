@@ -224,6 +224,7 @@ class TechResult:
     # Squeeze / Fear Mode support
     h4_ema20_slope:       float = 0.0   # % change of 4H EMA20 over last 5 candles (CHANGE 2B)
     m15_price_gt_h4_ema20: bool = False  # 15m price > 4H EMA20 (breakout confirmation)
+    h4_compression_days:  int   = 0     # calendar days 4H EMA spread has been compressed < 3%
 
 
 @dataclass
@@ -434,6 +435,20 @@ def _mark_sc_alerted(symbol: str) -> None:
         del _sc_alerted[k]
 
 
+_sq_alerted: dict[str, float] = {}
+
+
+def _on_sq_cooldown(symbol: str) -> bool:
+    return (time.time() - _sq_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_SQ_COOLDOWN_MIN * 60
+
+
+def _mark_sq_alerted(symbol: str) -> None:
+    _sq_alerted[symbol] = time.time()
+    stale = time.time() - 172_800   # clean entries older than 48H
+    for k in [k for k, ts in _sq_alerted.items() if ts < stale]:
+        del _sq_alerted[k]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage 1 helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -498,8 +513,9 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     close_4h = df_4h["close"]
 
     # ── 4H Macro Filter ──────────────────────────────────────────────────────
+    ema6_4h_s  = compute_ema(close_4h, 6)
     ema20_4h_s = compute_ema(close_4h, 20)
-    h4_ema6    = float(compute_ema(close_4h,  6).iloc[-1])
+    h4_ema6    = float(ema6_4h_s.iloc[-1])
     h4_ema12   = float(compute_ema(close_4h, 12).iloc[-1])
     h4_ema20   = float(ema20_4h_s.iloc[-1])
     h4_ema_sep = (h4_ema6 - h4_ema20) / h4_ema20 if h4_ema20 > 0 else 0.0
@@ -511,6 +527,18 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     if len(ema20_4h_s) >= 6:
         prev5 = float(ema20_4h_s.iloc[-6])
         h4_ema20_slope = (h4_ema20 - prev5) / prev5 * 100.0 if prev5 > 0 else 0.0
+
+    # Compression days: consecutive 4H candles where EMA6/EMA20 spread < 3% (PART 3)
+    h4_compression_days = 0
+    for _ci in range(1, min(len(ema6_4h_s), 121)):   # max 120 candles ≈ 20 days
+        _e6  = float(ema6_4h_s.iloc[-_ci])
+        _e20 = float(ema20_4h_s.iloc[-_ci])
+        _sp  = abs(_e6 - _e20) / _e20 * 100.0 if _e20 > 0 else 999.0
+        if _sp < cfg.MOMENTUM_SQUEEZE_EMA_SPREAD_MAX:
+            h4_compression_days += 1
+        else:
+            break
+    h4_compression_days = max(1, h4_compression_days // 4)  # 4H candles → calendar days
 
     h4_rsi6    = float(compute_rsi(close_4h, period=6).iloc[-1])
     h4_dif, h4_dea, _ = compute_macd(close_4h)
@@ -627,6 +655,7 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         m15_ema6_gt_ema12=m15_ema6_gt_ema12,
         h4_ema20_slope=round(h4_ema20_slope, 3),
         m15_price_gt_h4_ema20=m15_price_gt_h4_ema20,
+        h4_compression_days=h4_compression_days,
     )
 
 
@@ -820,6 +849,27 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
     else:
         tech.m5_ok   = True
         tech.m5_note = ""
+
+
+def _score_squeeze(tech: TechResult, mcap: float, circ_pct: float, has_inf_supply: bool) -> int:
+    """
+    Compute BB-Squeeze Breakout quality score (PART 3).
+    Base 70; bonuses for extreme vol, ATH distance, circ%, MCap; penalties for unknown supply / low circ.
+    """
+    score = cfg.MOMENTUM_SQ_BASE_SCORE
+    if tech.m15_vol_spike_ratio >= cfg.MOMENTUM_SQ_VOL_EXTREME:
+        score += cfg.MOMENTUM_SQ_VOL_EXTREME_PTS
+    if tech.ath_dist_pct > cfg.MOMENTUM_SQ_ATH_DIST_BONUS:
+        score += cfg.MOMENTUM_SQ_ATH_DIST_PTS
+    if circ_pct >= cfg.MOMENTUM_SQ_CIRC_BONUS_PCT:
+        score += cfg.MOMENTUM_SQ_CIRC_BONUS_PTS
+    if mcap > cfg.MOMENTUM_SQ_MCAP_BONUS_USD:
+        score += cfg.MOMENTUM_SQ_MCAP_BONUS_PTS
+    if has_inf_supply:
+        score -= cfg.MOMENTUM_SQ_INF_SUPPLY_PEN
+    if 0 < circ_pct < cfg.MOMENTUM_SQ_CIRC_LOW_PCT:
+        score -= cfg.MOMENTUM_SQ_CIRC_LOW_PEN
+    return score
 
 
 def _check_15m_fasttrack(mexc_symbol: str) -> bool:
@@ -1052,6 +1102,7 @@ def scan() -> list[MomentumResult]:
     scored:              list[MomentumResult] = []
     cooling_alerts:      list[MomentumResult] = []
     macro_blocked_count: int = 0
+    sq_pending:          list[tuple] = []   # [(entry, tech, sq_score), ...] for Stage 2g
 
     # Stage 2a block counters (CHANGE 2C)
     _s2a_ema_bearish:   int = 0   # EMA6 not > EMA12 > EMA20
@@ -1104,6 +1155,15 @@ def scan() -> list[MomentumResult]:
                     f"slope {tech.h4_ema20_slope:+.2f}%  vol {tech.m15_vol_spike_ratio:.1f}×  "
                     f"px_above_h4ema20={px_breakout} — bypassing Stage 2a"
                 )
+                # Stash as SQUEEZE BREAKOUT candidate (PART 3) — evaluated after main pipeline
+                sq_rsi_ok = cfg.MOMENTUM_SQ_15M_RSI_MIN <= tech.m15_rsi6 <= cfg.MOMENTUM_SQ_15M_RSI_MAX
+                sq_1h_ok  = cfg.MOMENTUM_SQ_1H_MIN <= change_1h <= cfg.MOMENTUM_SQ_1H_MAX
+                if sq_rsi_ok and sq_1h_ok:
+                    has_inf_now = _inf_supply_map.get(symbol, False)
+                    sq_score = _score_squeeze(tech, mcap, circ_pct, has_inf_now)
+                    if sq_score >= cfg.MOMENTUM_SQ_MIN_SCORE:
+                        sq_pending.append((entry, tech, sq_score))
+                        log.debug(f"  💥 SQ stash  {symbol}: score {sq_score} RSI {tech.m15_rsi6:.1f}")
 
         # ── Stage 2a: 4H macro gate (EMA stack + separation) ──────────────────
         if not tech.macro_ok:
@@ -1780,6 +1840,67 @@ def scan() -> list[MomentumResult]:
             ath_dist_pct=round(tech.ath_dist_pct, 1),
         ))
 
+    # ── Stage 2g: BB-Squeeze Breakout pipeline (PART 3) ──────────────────────
+    sq_alerts: list[MomentumResult] = []
+    alerted_symbols = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts + pbw_alerts + sc_alerts}
+    sq_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SQ_SL_PCT  / 100.0, 2)
+    sq_rwd_tp1   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SQ_TP1_PCT / 100.0, 2)
+    sq_rwd_tp2   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SQ_TP2_PCT / 100.0, 2)
+
+    for (sq_entry, sq_tech, sq_score) in sq_pending:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = sq_entry
+
+        if symbol in alerted_symbols:
+            continue
+        if _on_sq_cooldown(symbol):
+            log.debug(f"  SQ COOLDOWN: {symbol}")
+            continue
+
+        _apply_5m_to_tech(sq_tech, _check_5m(mexc_symbol))
+
+        has_inf = _inf_supply_map.get(symbol, False)
+        sq_warnings: list[str] = []
+        if symbol in _micro_cap_set:
+            sq_warnings.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+            sq_warnings.append("⚠️ Treat as high-risk, max 50% normal margin")
+        if has_inf:
+            sq_warnings.append("⚠️ Max Supply unknown — inflation risk")
+        if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
+            sq_warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+        if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
+            sq_warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
+
+        log.info(
+            f"  💥 SQUEEZE BREAKOUT  {symbol}  1h {change_1h:+.2f}%  "
+            f"vol {sq_tech.m15_vol_spike_ratio:.1f}×  RSI {sq_tech.m15_rsi6:.1f}  "
+            f"compress {sq_tech.h4_compression_days}d  score {sq_score}"
+        )
+        _mark_sq_alerted(symbol)
+        alerted_symbols.add(symbol)
+        _last_scan_outcomes.append(CandidateOutcome(
+            symbol, change_1h, sq_score, "SQ", "SQUEEZE BREAKOUT",
+            sq_tech.vol_pct, sq_tech.h4_kdj_j))
+
+        sq_alerts.append(MomentumResult(
+            symbol=symbol, name=name, price=round(price, 8),
+            change_1h=round(change_1h, 2), change_24h=round(change_24h, 2),
+            market_cap=mcap, volume_24h=vol_24h, fdv=fdv,
+            fdv_mcap_ratio=round(fdv_ratio, 2), circ_supply_pct=round(circ_pct, 1),
+            matched_tags=matched_tags, mexc_symbol=mexc_symbol,
+            tech=sq_tech, total_score=sq_score,
+            recommendation="SQUEEZE", rec_emoji="💥",
+            warnings=sq_warnings, m5_note=sq_tech.m5_note,
+            entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SQ_SL_PCT / 100), _price_decimals(price)),
+            tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_SQ_TP1_PCT / 100), _price_decimals(price)),
+            tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_SQ_TP2_PCT / 100), _price_decimals(price)),
+            risk_usd=sq_risk_usd, reward_tp1_usd=sq_rwd_tp1, reward_tp2_usd=sq_rwd_tp2,
+            rr_str=f"1:{sq_rwd_tp1/sq_risk_usd:.2f}", sl_pct=cfg.MOMENTUM_SQ_SL_PCT,
+            infinite_supply=has_inf, ath_dist_pct=round(sq_tech.ath_dist_pct, 1),
+            squeeze_bypass=True,
+        ))
+
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
     early   = sum(r.recommendation == "EARLY SIGNAL" for r in new_alerts)
@@ -1788,15 +1909,16 @@ def scan() -> list[MomentumResult]:
     rb      = len(rb_alerts)
     pbw     = len(pbw_alerts)
     sc_n    = len(sc_alerts)
+    sq_n    = len(sq_alerts)
     cooling = len(cooling_alerts)
     log.info(
         f"Scan done — {len(candidates)} M1–M7, "
         f"{macro_blocked_count} macro-blocked, "
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
         f"{strong} STRONG + {watch} WATCH + {early} EARLY + "
-        f"{gc} GC + {vs} VS + {rb} RB + {pbw} PBW + {sc_n} SC + {cooling} COOLING alerts."
+        f"{gc} GC + {vs} VS + {rb} RB + {pbw} PBW + {sc_n} SC + {sq_n} SQ + {cooling} COOLING alerts."
     )
-    return new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts + pbw_alerts + sc_alerts
+    return new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts + pbw_alerts + sc_alerts + sq_alerts
 
 
 # ══════════════════════════════════════════════════════════════════════════════

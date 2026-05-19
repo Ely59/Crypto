@@ -244,6 +244,8 @@ def run_momentum_scan():
             m4.send_pbw_alert(coin)
         elif coin.recommendation == "STAIRCASE":
             m4.send_staircase_alert(coin)
+        elif coin.recommendation == "SQUEEZE":
+            m4.send_squeeze_alert(coin)
         else:
             m4.send_momentum_alert(coin)
         m_log.log_alert(coin, coin.recommendation)

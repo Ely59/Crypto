@@ -45,6 +45,7 @@ class DailyStats:
     cooling_alerts: int        = 0   # COOLING_DOWN (4H KDJ overheated) alerts sent
     pbw_alerts:     int        = 0   # PRE-BREAKOUT Watch alerts sent
     sc_alerts:      int        = 0   # STAIRCASE Continuation alerts sent
+    sq_alerts:      int        = 0   # SQUEEZE BREAKOUT alerts sent
     best_coin:      str        = ""
     best_score:     int        = 0
     last_scan_ts:   str        = ""  # HH:MM Berlin time of most recent scan
@@ -139,6 +140,8 @@ class StatsTracker:
                     s.pbw_alerts += 1
                 elif rec == "STAIRCASE":
                     s.sc_alerts += 1
+                elif rec == "SQUEEZE":
+                    s.sq_alerts += 1
 
                 _no_score = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY"}
 
@@ -165,6 +168,9 @@ class StatsTracker:
                     snapshot.append(f"⚡ {r.symbol} {r.change_1h:+.2f}% — VOL SPIKE {ratio}")
                 elif rec == "RECOVERY":
                     snapshot.append(f"♻️ {r.symbol} {r.change_1h:+.2f}% — RECOVERY")
+                elif rec == "SQUEEZE":
+                    ratio = f"{r.tech.m15_vol_spike_ratio:.1f}×" if r.tech else "?"
+                    snapshot.append(f"💥 {r.symbol} {r.change_1h:+.2f}% — SQUEEZE {ratio}")
                 else:
                     snapshot.append(
                         f"{r.rec_emoji} {r.symbol} {r.change_1h:+.2f}%"
@@ -235,7 +241,7 @@ class StatsTracker:
 
             total_alerts = (s.entry_alerts + s.watch_alerts + s.early_alerts +
                             s.gc_alerts + s.vs_alerts + s.rb_alerts +
-                            s.pbw_alerts + s.sc_alerts)
+                            s.pbw_alerts + s.sc_alerts + s.sq_alerts)
             lines = []
             if s.fear_mode_active:
                 lines.append(f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — Stage 2a relaxed to 0.05% sep")
@@ -250,7 +256,7 @@ class StatsTracker:
                 f"Alerts sent: <b>{total_alerts}</b>  "
                 f"(Entry: {s.entry_alerts} | Watch: {s.watch_alerts} | Early: {s.early_alerts} "
                 f"| GC: {s.gc_alerts} | VS: {s.vs_alerts} | RB: {s.rb_alerts} "
-                f"| PBW: {s.pbw_alerts} | SC: {s.sc_alerts} | Cooling: {s.cooling_alerts})",
+                f"| PBW: {s.pbw_alerts} | SC: {s.sc_alerts} | SQ: {s.sq_alerts} | Cooling: {s.cooling_alerts})",
             ]
 
             if s.top_coins:

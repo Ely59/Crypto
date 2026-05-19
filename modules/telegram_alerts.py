@@ -1399,6 +1399,65 @@ def send_staircase_alert(coin) -> bool:
     return send_message(build_staircase_alert(coin))
 
 
+def build_squeeze_alert(coin) -> str:
+    """
+    💥 BB-Squeeze Breakout alert.
+    Fires when a coin breaks out of weeks of EMA compression on extreme 15m volume.
+    """
+    mexc_url   = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    t          = coin.tech
+    vol_ratio  = f"{t.m15_vol_spike_ratio:.1f}" if t else "?"
+    rsi_val    = f"{t.m15_rsi6:.0f}"            if t else "?"
+    compress_d = t.h4_compression_days           if t else 0
+    ath_dist   = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
+
+    lines = [
+        f"💥 <b>SQUEEZE BREAKOUT: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
+        "Weeks of compression → exploding NOW.",
+        f"Vol <b>{vol_ratio}×</b> normal — move starting.",
+        "⚡ Fast signal — act within 5 minutes.",
+    ]
+
+    if t is not None:
+        kdj_arrow  = "↑" if t.m5_kdj_rising else "↓"
+        m5_kdj_str = f"{t.m5_kdj_j:.0f}{kdj_arrow}" if t.m5_rsi6 > 0 else "n/v"
+        m5_rsi_str = f"{t.m5_rsi6:.0f}"              if t.m5_rsi6 > 0 else "n/v"
+        lines += [
+            "",
+            f"4H:  EMA compressed <b>{compress_d} days</b> | Now breaking out",
+            f"15m: Vol <b>{vol_ratio}×</b> | RSI <b>{rsi_val}</b> | Price &gt; EMA20",
+            f"5m:  KDJ J: <b>{m5_kdj_str}</b> | RSI <b>{m5_rsi_str}</b>",
+        ]
+
+    ep = coin.entry_price
+    lines += [
+        "",
+        f"Entry:  <b>{_fmt_price(ep)}</b>",
+        f"SL (-{cfg.MOMENTUM_SQ_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_SQ_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close, SL to entry",
+        f"TP2 (+{cfg.MOMENTUM_SQ_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b> → trailing SL",
+        "",
+        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
+        f"MCap: {_vol_human(coin.market_cap)} | Compression: {compress_d} days",
+    ]
+
+    if coin.warnings:
+        for w in coin.warnings:
+            lines.append(f"⚠️ {w}")
+
+    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
+    return "\n".join(lines)
+
+
+def send_squeeze_alert(coin) -> bool:
+    """Send a BB-Squeeze Breakout alert to Telegram."""
+    log.info(
+        f"Sending SQUEEZE BREAKOUT alert for {coin.symbol} "
+        f"({coin.change_1h:+.2f}% 1h, score {coin.total_score})…"
+    )
+    return send_message(build_squeeze_alert(coin))
+
+
 def build_weekly_hitrate_report(stats: dict) -> str:
     """
     Weekly hit-rate report — sent every Sunday 09:00 Berlin.
@@ -1420,6 +1479,7 @@ def build_weekly_hitrate_report(stats: dict) -> str:
         "STRONG ENTRY":  "🟢 Strong Entry",
         "WATCH":         "🟡 Watch",
         "EARLY SIGNAL":  "🔍 Early Signal",
+        "SQUEEZE":       "💥 BB-Squeeze",
     }
 
     lines = [
