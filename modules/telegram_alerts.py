@@ -160,6 +160,25 @@ def _fmt_price(price: float) -> str:
         return f"{price:.6f}"
 
 
+def _fmt_ath_line(coin) -> str:
+    """Return '📅 ATH: $X (Mon YYYY — N days ago)' or '' if data unavailable."""
+    ath_price = getattr(coin, "ath_price", 0.0)
+    ath_date  = getattr(coin, "ath_date",  "")
+    if not ath_price or ath_price <= 0:
+        return ""
+    price_str = _fmt_price(ath_price)
+    if ath_date:
+        try:
+            from datetime import datetime, timezone
+            dt       = datetime.fromisoformat(ath_date.replace("Z", "+00:00"))
+            month_str = dt.strftime("%b %Y")
+            days_ago  = (datetime.now(tz=timezone.utc) - dt).days
+            return f"📅 ATH: ${price_str} ({month_str} — {days_ago:,} days ago)"
+        except Exception:
+            pass
+    return f"📅 ATH: ${price_str}"
+
+
 def _signal_chain_lines(coin) -> list[str]:
     """
     Build the 4H/15m/5m signal chain block shown above the entry in all alerts.
@@ -1128,8 +1147,10 @@ def build_momentum_alert(coin) -> str:
             f"Volume: {ck(t.vol_ok)} {t.vol_pct:.0f}% of MA10",
         ]
 
-    if coin.ath_pts > 0 and coin.tech is not None:
-        lines.append(f"📊 ATH distance: -{coin.tech.ath_dist_pct:.0f}% from 16D peak (+{coin.ath_pts} pts)")
+    if coin.ath_pts != 0:
+        ath_dist_disp = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (coin.tech.ath_dist_pct if coin.tech else 0.0)
+        pts_str = f"+{coin.ath_pts}" if coin.ath_pts > 0 else str(coin.ath_pts)
+        lines.append(f"📊 ATH distance: -{ath_dist_disp:.0f}% ({pts_str} pts)")
 
     lines += [
         "",
@@ -1155,8 +1176,11 @@ def build_momentum_alert(coin) -> str:
 
     ath_dist = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (coin.tech.ath_dist_pct if coin.tech else 0.0)
     h4_status = "✅ Bullish" if (coin.tech and coin.tech.h4_ema_ok) else "❌ Bearish"
+    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
+    _ath_l = _fmt_ath_line(coin)
+    if _ath_l:
+        lines.append(_ath_l)
     lines += [
-        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
         f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
         "",
         f"R/R: {coin.rr_str}",
@@ -1317,9 +1341,12 @@ def build_volume_spike_alert(coin) -> str:
         f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
         f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
-        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
-        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
     ]
+    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
+    _vs_ath_l = _fmt_ath_line(coin)
+    if _vs_ath_l:
+        lines.append(_vs_ath_l)
+    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
     if coin.warnings:
         for w in coin.warnings:
@@ -1364,9 +1391,12 @@ def build_recovery_alert(coin) -> str:
         f"TP1 (+{cfg.MOMENTUM_RB_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
         f"TP2 (+{cfg.MOMENTUM_RB_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
-        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
-        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
     ]
+    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
+    _rb_ath_l = _fmt_ath_line(coin)
+    if _rb_ath_l:
+        lines.append(_rb_ath_l)
+    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
     if coin.warnings:
         for w in coin.warnings:
@@ -1412,9 +1442,12 @@ def build_golden_cross_alert(coin) -> str:
         f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
         f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
-        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
-        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
     ]
+    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
+    _gc_ath_l = _fmt_ath_line(coin)
+    if _gc_ath_l:
+        lines.append(_gc_ath_l)
+    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
     if coin.warnings:
         for w in coin.warnings:
@@ -1453,8 +1486,11 @@ def build_pbw_alert(coin) -> str:
         f"TP2 (+{cfg.MOMENTUM_PBW_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
         f"ATH-Dist: -{coin.ath_dist_pct:.0f}% 📊 | Score: {score_str}/100",
-        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
     ]
+    _pbw_ath_l = _fmt_ath_line(coin)
+    if _pbw_ath_l:
+        lines.append(_pbw_ath_l)
+    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
     if coin.warnings:
         for w in coin.warnings:
@@ -1494,9 +1530,12 @@ def build_staircase_alert(coin) -> str:
         f"TP1 (+{cfg.MOMENTUM_SC_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
         f"TP2 (+{cfg.MOMENTUM_SC_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
         "",
-        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {score_str}/100",
-        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
     ]
+    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {score_str}/100")
+    _sc_ath_l = _fmt_ath_line(coin)
+    if _sc_ath_l:
+        lines.append(_sc_ath_l)
+    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
 
     if coin.warnings:
         for w in coin.warnings:
@@ -1550,9 +1589,12 @@ def build_squeeze_alert(coin) -> str:
         f"TP1 (+{cfg.MOMENTUM_SQ_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close, SL to entry",
         f"TP2 (+{cfg.MOMENTUM_SQ_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b> → trailing SL",
         "",
-        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
-        f"MCap: {_vol_human(coin.market_cap)} | Compression: {compress_d} days",
     ]
+    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
+    _sq_ath_l = _fmt_ath_line(coin)
+    if _sq_ath_l:
+        lines.append(_sq_ath_l)
+    lines.append(f"MCap: {_vol_human(coin.market_cap)} | Compression: {compress_d} days")
 
     if coin.warnings:
         for w in coin.warnings:

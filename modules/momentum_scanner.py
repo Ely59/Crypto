@@ -66,6 +66,7 @@ from utils.api_client import (
     get_cmc_momentum_listings,
     get_mexc_futures_symbols,
     get_mexc_futures_klines,
+    get_coingecko_ath_map,
 )
 from utils.indicators import compute_ema, compute_rsi, compute_macd, compute_kdj
 from utils.logger     import get_logger
@@ -287,7 +288,9 @@ class MomentumResult:
     m1_rsi_streak:    int   = 0      # consecutive 1m candles with RSI < 45 (PBW)
     m1_vol_ratio:     float = 0.0    # 1m trigger vol / MA10 ratio (PBW)
     sc_prior_move:    float = 0.0    # 24H price range % (Staircase prior leg)
-    ath_dist_pct:     float = 0.0    # % below 16D peak (direct field for PBW/SC without tech)
+    ath_dist_pct:     float = 0.0    # % below real ATH (from CoinGecko; fallback to 16D peak)
+    ath_price:        float = 0.0    # true all-time high price (USD, from CoinGecko)
+    ath_date:         str   = ""     # ATH date ISO string from CoinGecko
 
     # 5m layer data and advisory note (for signal chain display in alerts)
     m5_rsi6:   float = 0.0
@@ -901,6 +904,31 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
         tech.m5_note = ""
 
 
+def _ath_score(dist_pct: float) -> int:
+    """Bonus (+) or penalty (-) based on real ATH distance."""
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_L2:
+        return cfg.MOMENTUM_ATH_DIST_L2_PTS   # >90% → +5
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_L1:
+        return cfg.MOMENTUM_ATH_DIST_L1_PTS   # 80-90% → +3
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_P1:
+        return 0                               # 60-80% → neutral
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_P2:
+        return cfg.MOMENTUM_ATH_DIST_P1_PTS   # 40-60% → -3
+    return cfg.MOMENTUM_ATH_DIST_P2_PTS        # < 40% → -8
+
+
+def _lookup_ath(ath_map: dict, symbol: str, price: float,
+                fallback_dist: float) -> tuple[float, float, str]:
+    """Return (dist_pct, ath_price, ath_date) from CoinGecko map or fallback."""
+    info      = ath_map.get(symbol, {})
+    ath_price = float(info.get("ath") or 0)
+    ath_date  = info.get("ath_date") or ""
+    if ath_price > 0 and price > 0:
+        dist = round((ath_price - price) / ath_price * 100.0, 1)
+        return dist, round(ath_price, 8), ath_date
+    return fallback_dist, 0.0, ""
+
+
 def _score_squeeze(tech: TechResult, mcap: float, circ_pct: float, has_inf_supply: bool) -> int:
     """
     Compute BB-Squeeze Breakout quality score (PART 3).
@@ -909,8 +937,7 @@ def _score_squeeze(tech: TechResult, mcap: float, circ_pct: float, has_inf_suppl
     score = cfg.MOMENTUM_SQ_BASE_SCORE
     if tech.m15_vol_spike_ratio >= cfg.MOMENTUM_SQ_VOL_EXTREME:
         score += cfg.MOMENTUM_SQ_VOL_EXTREME_PTS
-    if tech.ath_dist_pct > cfg.MOMENTUM_SQ_ATH_DIST_BONUS:
-        score += cfg.MOMENTUM_SQ_ATH_DIST_PTS
+    # ATH bonus/penalty applied externally via _ath_score() in the caller
     if circ_pct >= cfg.MOMENTUM_SQ_CIRC_BONUS_PCT:
         score += cfg.MOMENTUM_SQ_CIRC_BONUS_PTS
     if mcap > cfg.MOMENTUM_SQ_MCAP_BONUS_USD:
@@ -952,6 +979,7 @@ def scan() -> list[MomentumResult]:
     """
     _refresh_market_context()   # update F&G + BTC 24H once per hour
 
+    _ath_map    = get_coingecko_ath_map(limit=500)   # real ATH from CoinGecko
     futures_set = get_mexc_futures_symbols()
     if not futures_set:
         log.error("Momentum scan aborted — MEXC futures list unavailable.")
@@ -1209,10 +1237,14 @@ def scan() -> list[MomentumResult]:
                 sq_rsi_ok = cfg.MOMENTUM_SQ_15M_RSI_MIN <= tech.m15_rsi6 <= cfg.MOMENTUM_SQ_15M_RSI_MAX
                 sq_1h_ok  = cfg.MOMENTUM_SQ_1H_MIN <= change_1h <= cfg.MOMENTUM_SQ_1H_MAX
                 if sq_rsi_ok and sq_1h_ok:
-                    has_inf_now = _inf_supply_map.get(symbol, False)
-                    sq_score = _score_squeeze(tech, mcap, circ_pct, has_inf_now)
+                    has_inf_now  = _inf_supply_map.get(symbol, False)
+                    _sq_ath_dist, _sq_ath_price, _sq_ath_date = _lookup_ath(
+                        _ath_map, symbol, price, tech.ath_dist_pct)
+                    sq_score = (_score_squeeze(tech, mcap, circ_pct, has_inf_now)
+                                + _ath_score(_sq_ath_dist))
                     if sq_score >= cfg.MOMENTUM_SQ_MIN_SCORE:
-                        sq_pending.append((entry, tech, sq_score))
+                        sq_pending.append((entry, tech, sq_score,
+                                           _sq_ath_dist, _sq_ath_price, _sq_ath_date))
                         log.debug(f"  💥 SQ stash  {symbol}: score {sq_score} RSI {tech.m15_rsi6:.1f}")
 
         # ── Stage 2a: 4H macro gate (EMA stack + separation) ──────────────────
@@ -1281,13 +1313,10 @@ def scan() -> list[MomentumResult]:
         # Fundamental bonus
         fund = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
 
-        # ATH distance bonus (FIX 4)
-        if tech.ath_dist_pct > cfg.MOMENTUM_ATH_DIST_L2:
-            ath_pts = cfg.MOMENTUM_ATH_DIST_L2_PTS   # > 90% below 16D peak → +5
-        elif tech.ath_dist_pct > cfg.MOMENTUM_ATH_DIST_L1:
-            ath_pts = cfg.MOMENTUM_ATH_DIST_L1_PTS   # > 80% below 16D peak → +3
-        else:
-            ath_pts = 0
+        # ATH distance — real ATH from CoinGecko (fallback to 16D candle peak)
+        real_ath_dist, real_ath_price, real_ath_date = _lookup_ath(
+            _ath_map, symbol, price, tech.ath_dist_pct)
+        ath_pts = _ath_score(real_ath_dist)
 
         # Total score
         total = tech.score + fund.total + ath_pts
@@ -1383,7 +1412,9 @@ def scan() -> list[MomentumResult]:
             rr_str          = coin_rr_str,
             sl_pct          = coin_sl_pct,
             infinite_supply = _inf_supply_map.get(symbol, False),
-            ath_dist_pct    = round(tech.ath_dist_pct, 1),
+            ath_dist_pct    = real_ath_dist,
+            ath_price       = real_ath_price,
+            ath_date        = real_ath_date,
             m5_note         = tech.m5_note,
             squeeze_bypass  = squeeze_bypass,
         ))
@@ -1490,6 +1521,7 @@ def scan() -> list[MomentumResult]:
         gc_sl_factor = 1.0 - cfg.MOMENTUM_GC_SL_PCT / 100.0
         gc_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_GC_SL_PCT / 100.0, 2)
         gc_rr_str    = f"1:{_rwd_tp1 / gc_risk_usd:.2f}"
+        _gc_ath_dist, _gc_ath_price, _gc_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
         gc_alerts.append(MomentumResult(
             symbol          = symbol,
@@ -1518,6 +1550,9 @@ def scan() -> list[MomentumResult]:
             reward_tp2_usd  = _rwd_tp2,
             rr_str          = gc_rr_str,
             sl_pct          = cfg.MOMENTUM_GC_SL_PCT,
+            ath_dist_pct    = _gc_ath_dist,
+            ath_price       = _gc_ath_price,
+            ath_date        = _gc_ath_date,
         ))
 
     # ── Stage 2c: Volume Spike pipeline ──────────────────────────────────────
@@ -1569,6 +1604,7 @@ def scan() -> list[MomentumResult]:
 
         vs_sl_factor = 1.0 - cfg.MOMENTUM_VS_SL_PCT / 100.0
         vs_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_VS_SL_PCT / 100.0, 2)
+        _vs_ath_dist, _vs_ath_price, _vs_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
         vs_alerts.append(MomentumResult(
             symbol          = symbol,
@@ -1597,6 +1633,9 @@ def scan() -> list[MomentumResult]:
             reward_tp2_usd  = _rwd_tp2,
             rr_str          = f"1:{_rwd_tp1 / vs_risk_usd:.2f}",
             sl_pct          = cfg.MOMENTUM_VS_SL_PCT,
+            ath_dist_pct    = _vs_ath_dist,
+            ath_price       = _vs_ath_price,
+            ath_date        = _vs_ath_date,
         ))
 
     # ── Stage 2d: Recovery Bounce pipeline ───────────────────────────────────
@@ -1678,6 +1717,7 @@ def scan() -> list[MomentumResult]:
         rb_risk_usd   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_SL_PCT / 100.0, 2)
         rb_rwd_tp1    = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_TP1_PCT / 100.0, 2)
         rb_rwd_tp2    = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_TP2_PCT / 100.0, 2)
+        _rb_ath_dist, _rb_ath_price, _rb_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
         rb_alerts.append(MomentumResult(
             symbol          = symbol,
@@ -1706,6 +1746,9 @@ def scan() -> list[MomentumResult]:
             reward_tp2_usd  = rb_rwd_tp2,
             rr_str          = f"1:{rb_rwd_tp1 / rb_risk_usd:.2f}",
             sl_pct          = cfg.MOMENTUM_RB_SL_PCT,
+            ath_dist_pct    = _rb_ath_dist,
+            ath_price       = _rb_ath_price,
+            ath_date        = _rb_ath_date,
         ))
 
     # ── Stage 2e: Pre-Breakout Watch pipeline ────────────────────────────────
@@ -1736,9 +1779,10 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  PBW skip {symbol}: 4H EMA not bullish")
             continue
 
-        # ATH distance from 4H data
-        h16d_high    = float(df_4h["high"].max())
-        ath_dist_pct = (h16d_high - price) / h16d_high * 100 if h16d_high > 0 else 0.0
+        # ATH distance — real ATH from CoinGecko, fallback to 16D candle high
+        h16d_high        = float(df_4h["high"].max())
+        _h16d_dist       = (h16d_high - price) / h16d_high * 100 if h16d_high > 0 else 0.0
+        ath_dist_pct, _pbw_ath_price, _pbw_ath_date = _lookup_ath(_ath_map, symbol, price, _h16d_dist)
 
         pbw = _check_5m_pbw(mexc_symbol, fear_mode=_fear_mode)
         if pbw is None:
@@ -1819,6 +1863,8 @@ def scan() -> list[MomentumResult]:
             m1_rsi_streak=pbw["rsi_streak"],
             m1_vol_ratio=pbw["vol_ratio"],
             ath_dist_pct=round(ath_dist_pct, 1),
+            ath_price=_pbw_ath_price,
+            ath_date=_pbw_ath_date,
         ))
 
     # ── Stage 2f: Staircase Continuation pipeline ─────────────────────────────
@@ -1918,6 +1964,7 @@ def scan() -> list[MomentumResult]:
         risk   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_SL_PCT  / 100.0, 2)
         rwd1   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_TP1_PCT / 100.0, 2)
         rwd2   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_TP2_PCT / 100.0, 2)
+        _sc_ath_dist, _sc_ath_price, _sc_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
         sc_alerts.append(MomentumResult(
             symbol=symbol, name=name, price=round(price, 8),
@@ -1937,7 +1984,9 @@ def scan() -> list[MomentumResult]:
             rr_str=f"1:{rwd1/risk:.2f}", sl_pct=cfg.MOMENTUM_SC_SL_PCT,
             infinite_supply=has_inf,
             sc_prior_move=round(prior_move_pct, 1),
-            ath_dist_pct=round(tech.ath_dist_pct, 1),
+            ath_dist_pct=_sc_ath_dist,
+            ath_price=_sc_ath_price,
+            ath_date=_sc_ath_date,
         ))
 
     # ── Stage 2g: BB-Squeeze Breakout pipeline (PART 3) ──────────────────────
@@ -1947,7 +1996,8 @@ def scan() -> list[MomentumResult]:
     sq_rwd_tp1   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SQ_TP1_PCT / 100.0, 2)
     sq_rwd_tp2   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SQ_TP2_PCT / 100.0, 2)
 
-    for (sq_entry, sq_tech, sq_score) in sq_pending:
+    for (sq_entry, sq_tech, sq_score,
+         _sq_ath_dist, _sq_ath_price, _sq_ath_date) in sq_pending:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = sq_entry
 
@@ -2007,7 +2057,10 @@ def scan() -> list[MomentumResult]:
             tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_SQ_TP2_PCT / 100), _price_decimals(price)),
             risk_usd=sq_risk_usd, reward_tp1_usd=sq_rwd_tp1, reward_tp2_usd=sq_rwd_tp2,
             rr_str=f"1:{sq_rwd_tp1/sq_risk_usd:.2f}", sl_pct=cfg.MOMENTUM_SQ_SL_PCT,
-            infinite_supply=has_inf, ath_dist_pct=round(sq_tech.ath_dist_pct, 1),
+            infinite_supply=has_inf,
+            ath_dist_pct=_sq_ath_dist,
+            ath_price=_sq_ath_price,
+            ath_date=_sq_ath_date,
             squeeze_bypass=True,
         ))
 

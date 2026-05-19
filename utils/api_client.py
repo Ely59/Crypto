@@ -321,6 +321,38 @@ def get_coingecko_global() -> Optional[dict]:
         return None
 
 
+def get_coingecko_ath_map(limit: int = 500) -> dict:
+    """
+    Fetch true all-time high (ATH) price and date for the top `limit` coins.
+    Returns {SYMBOL_UPPER: {"ath": float, "ath_date": str}}.
+    Data comes from CoinGecko /coins/markets which uses the actual ATH, not a
+    rolling window — so FIDA shows $59.61, not the 16-day candle high.
+    """
+    result: dict = {}
+    per_page = 250
+    pages    = max(1, (limit + per_page - 1) // per_page)
+    for page in range(1, pages + 1):
+        data = _get(f"{COINGECKO_BASE_URL}/coins/markets", params={
+            "vs_currency": "usd",
+            "order":       "market_cap_desc",
+            "per_page":    per_page,
+            "page":        page,
+            "sparkline":   False,
+        })
+        if not data:
+            break
+        for coin in data:
+            sym      = (coin.get("symbol") or "").upper()
+            ath      = coin.get("ath")
+            ath_date = coin.get("ath_date") or ""
+            if sym and ath and float(ath) > 0:
+                result[sym] = {"ath": float(ath), "ath_date": ath_date}
+        if len(data) < per_page:
+            break
+    log.info(f"CoinGecko ATH map: {len(result)} entries loaded")
+    return result
+
+
 def get_btc_funding_rate() -> Optional[float]:
     """
     Latest perpetual funding rate for BTCUSDT from Binance Futures.
