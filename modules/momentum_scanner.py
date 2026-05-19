@@ -449,6 +449,48 @@ def _mark_sq_alerted(symbol: str) -> None:
         del _sq_alerted[k]
 
 
+# ── Global per-coin cooldown — CHANGE 5A ─────────────────────────────────────
+# Stores: symbol → (timestamp, rec_type, price_at_alert)
+_global_alerted: dict[str, tuple] = {}
+
+
+def _on_global_cooldown(symbol: str, new_rec: str, new_price: float) -> bool:
+    """Return True (block) if same coin was alerted within the global 4H window."""
+    entry = _global_alerted.get(symbol)
+    if entry is None:
+        return False
+    ts, prev_rec, prev_price = entry
+    if time.time() - ts >= cfg.MOMENTUM_GLOBAL_COOLDOWN_MIN * 60:
+        return False
+    # SQUEEZE exception: prior signal was a different type AND price moved > 10%
+    if (new_rec == "SQUEEZE" and prev_rec != "SQUEEZE"
+            and prev_price > 0
+            and abs(new_price - prev_price) / prev_price
+                > cfg.MOMENTUM_GLOBAL_SQ_EXCEPTION_PCT / 100.0):
+        return False
+    return True
+
+
+def _mark_global_alerted(symbol: str, rec_type: str, price: float) -> None:
+    _global_alerted[symbol] = (time.time(), rec_type, price)
+    stale = time.time() - 86_400
+    for k in [k for k, (ts, _r, _p) in list(_global_alerted.items()) if ts < stale]:
+        del _global_alerted[k]
+
+
+def get_global_cooldown_status() -> list:
+    """Return [(symbol, seconds_remaining, rec_type), ...] sorted longest-remaining first."""
+    now    = time.time()
+    window = cfg.MOMENTUM_GLOBAL_COOLDOWN_MIN * 60
+    result = []
+    for sym, (ts, rec, _) in _global_alerted.items():
+        remaining = window - (now - ts)
+        if remaining > 0:
+            result.append((sym, remaining, rec))
+    result.sort(key=lambda x: x[1], reverse=True)
+    return result
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage 1 helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1370,10 +1412,14 @@ def scan() -> list[MomentumResult]:
         if _on_cooldown(r.symbol):
             log.debug(f"  COOLDOWN: {r.symbol}")
             continue
+        if _on_global_cooldown(r.symbol, r.recommendation, r.price):
+            log.info(f"  GLOBAL COOLDOWN (4H): {r.symbol} — {r.recommendation} blocked")
+            continue
         if len(new_alerts) >= cfg.MOMENTUM_MAX_ALERTS_PER_SCAN:
             log.debug(f"  CAP: {r.symbol} (max {cfg.MOMENTUM_MAX_ALERTS_PER_SCAN} per scan)")
             break
         _mark_alerted(r.symbol)
+        _mark_global_alerted(r.symbol, r.recommendation, r.price)
         new_alerts.append(r)
 
     _last_macro_blocked = macro_blocked_count
@@ -1397,6 +1443,9 @@ def scan() -> list[MomentumResult]:
             continue  # main pipeline already alerted this coin this scan
         if _on_gc_cooldown(symbol):
             log.debug(f"  GC COOLDOWN: {symbol}")
+            continue
+        if _on_global_cooldown(symbol, "GOLDEN CROSS", price):
+            log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — GC blocked")
             continue
 
         # Graduated vol threshold: 0.5-0.8% uses GC floor, 0.8-5% uses early-detection floor
@@ -1432,6 +1481,7 @@ def scan() -> list[MomentumResult]:
             f"RSI {tech.m15_rsi6:.1f}  Vol {tech.vol_pct:.0f}%"
         )
         _mark_gc_alerted(symbol)
+        _mark_global_alerted(symbol, "GOLDEN CROSS", price)
         _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "GC", "GOLDEN CROSS", tech.vol_pct, tech.h4_kdj_j))
 
         gc_sl_factor = 1.0 - cfg.MOMENTUM_GC_SL_PCT / 100.0
@@ -1480,6 +1530,9 @@ def scan() -> list[MomentumResult]:
         if _on_vs_cooldown(symbol):
             log.debug(f"  VS COOLDOWN: {symbol}")
             continue
+        if _on_global_cooldown(symbol, "VOLUME SPIKE", price):
+            log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — VS blocked")
+            continue
 
         tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
         if tech is None:
@@ -1508,6 +1561,7 @@ def scan() -> list[MomentumResult]:
             f"vol {tech.m15_vol_spike_ratio:.1f}×  RSI {tech.m15_rsi6:.1f}"
         )
         _mark_vs_alerted(symbol)
+        _mark_global_alerted(symbol, "VOLUME SPIKE", price)
         _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "VS", "VOLUME SPIKE", tech.vol_pct, tech.h4_kdj_j))
 
         vs_sl_factor = 1.0 - cfg.MOMENTUM_VS_SL_PCT / 100.0
@@ -1554,6 +1608,9 @@ def scan() -> list[MomentumResult]:
             continue
         if _on_rb_cooldown(symbol):
             log.debug(f"  RB COOLDOWN: {symbol}")
+            continue
+        if _on_global_cooldown(symbol, "RECOVERY", price):
+            log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — RB blocked")
             continue
 
         tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_SLOW_MIN)
@@ -1609,6 +1666,7 @@ def scan() -> list[MomentumResult]:
             f"peak {h24_high:.4g}  pullback {pullback_shown:.1f}%  KDJ {tech.h4_kdj_j:.1f}"
         )
         _mark_rb_alerted(symbol)
+        _mark_global_alerted(symbol, "RECOVERY", price)
         _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "RB", "RECOVERY", tech.vol_pct, tech.h4_kdj_j))
 
         rb_sl_factor  = 1.0 - cfg.MOMENTUM_RB_SL_PCT / 100.0
@@ -1658,6 +1716,9 @@ def scan() -> list[MomentumResult]:
         if symbol in alerted_symbols:
             continue
         if _on_pbw_cooldown(symbol):
+            continue
+        if _on_global_cooldown(symbol, "PRE-BREAKOUT", price):
+            log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — PBW blocked")
             continue
 
         # 4H EMA stack check — no separation requirement (bypass sep check)
@@ -1724,6 +1785,7 @@ def scan() -> list[MomentumResult]:
             f"Vol {pbw['vol_ratio']:.1f}×"
         )
         _mark_pbw_alerted(symbol)
+        _mark_global_alerted(symbol, "PRE-BREAKOUT", price)
         _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, fund.total, "PBW", "PRE-BREAKOUT", 0.0, 0.0))
 
         sl_f   = 1.0 - cfg.MOMENTUM_PBW_SL_PCT  / 100.0
@@ -1767,6 +1829,9 @@ def scan() -> list[MomentumResult]:
         if symbol in alerted_symbols:
             continue
         if _on_sc_cooldown(symbol):
+            continue
+        if _on_global_cooldown(symbol, "STAIRCASE", price):
+            log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — SC blocked")
             continue
 
         tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_SLOW_MIN)
@@ -1841,6 +1906,7 @@ def scan() -> list[MomentumResult]:
             + (" [fear-mode]" if _fear_mode else "")
         )
         _mark_sc_alerted(symbol)
+        _mark_global_alerted(symbol, "STAIRCASE", price)
         _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, fund.total, "SC", "STAIRCASE", tech.vol_pct, tech.h4_kdj_j))
 
         sl_f   = 1.0 - cfg.MOMENTUM_SC_SL_PCT  / 100.0
@@ -1887,6 +1953,9 @@ def scan() -> list[MomentumResult]:
         if _on_sq_cooldown(symbol):
             log.debug(f"  SQ COOLDOWN: {symbol}")
             continue
+        if _on_global_cooldown(symbol, "SQUEEZE", price):
+            log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — SQ blocked (exception not met)")
+            continue
 
         _apply_5m_to_tech(sq_tech, _check_5m(mexc_symbol))
 
@@ -1908,6 +1977,7 @@ def scan() -> list[MomentumResult]:
             f"compress {sq_tech.h4_compression_days}d  score {sq_score}"
         )
         _mark_sq_alerted(symbol)
+        _mark_global_alerted(symbol, "SQUEEZE", price)
         alerted_symbols.add(symbol)
         _last_scan_outcomes.append(CandidateOutcome(
             symbol, change_1h, sq_score, "SQ", "SQUEEZE BREAKOUT",
@@ -1931,6 +2001,43 @@ def scan() -> list[MomentumResult]:
             infinite_supply=has_inf, ath_dist_pct=round(sq_tech.ath_dist_pct, 1),
             squeeze_bypass=True,
         ))
+
+    # ── CHANGE 5B: Session-level dedup — one alert per coin per scan ────────────
+    _DEDUP_PRIORITY = {
+        "SQUEEZE": 8, "STRONG ENTRY": 7, "WATCH": 6, "RECOVERY": 5,
+        "GOLDEN CROSS": 4, "STAIRCASE": 4, "VOLUME SPIKE": 3,
+        "PRE-BREAKOUT": 3, "EARLY SIGNAL": 2, "COOLING_DOWN": 1,
+    }
+    _all_this_scan = (new_alerts + cooling_alerts + gc_alerts + vs_alerts +
+                      rb_alerts + pbw_alerts + sc_alerts + sq_alerts)
+    _best_per_sym: dict[str, MomentumResult] = {}
+    for _r in _all_this_scan:
+        _prev = _best_per_sym.get(_r.symbol)
+        if _prev is None:
+            _best_per_sym[_r.symbol] = _r
+        else:
+            _r_pri   = _DEDUP_PRIORITY.get(_r.recommendation, 0)
+            _pre_pri = _DEDUP_PRIORITY.get(_prev.recommendation, 0)
+            if _r_pri > _pre_pri or (_r_pri == _pre_pri and _r.total_score > _prev.total_score):
+                log.info(
+                    f"  Dedup: {_r.symbol} — kept {_r.recommendation} ({_r.total_score}), "
+                    f"dropped {_prev.recommendation} ({_prev.total_score})"
+                )
+                _best_per_sym[_r.symbol] = _r
+            else:
+                log.info(
+                    f"  Dedup: {_r.symbol} — kept {_prev.recommendation} ({_prev.total_score}), "
+                    f"dropped {_r.recommendation} ({_r.total_score})"
+                )
+    _keep_ids = {id(r) for r in _best_per_sym.values()}
+    new_alerts     = [r for r in new_alerts     if id(r) in _keep_ids]
+    cooling_alerts = [r for r in cooling_alerts if id(r) in _keep_ids]
+    gc_alerts      = [r for r in gc_alerts      if id(r) in _keep_ids]
+    vs_alerts      = [r for r in vs_alerts      if id(r) in _keep_ids]
+    rb_alerts      = [r for r in rb_alerts      if id(r) in _keep_ids]
+    pbw_alerts     = [r for r in pbw_alerts     if id(r) in _keep_ids]
+    sc_alerts      = [r for r in sc_alerts      if id(r) in _keep_ids]
+    sq_alerts      = [r for r in sq_alerts      if id(r) in _keep_ids]
 
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)

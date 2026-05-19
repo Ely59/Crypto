@@ -273,6 +273,19 @@ class StatsTracker:
             else:
                 lines += ["", "Last scan: no qualifying coins."]
 
+            # Global 4H cooldown display (CHANGE 5C)
+            try:
+                from modules.momentum_scanner import get_global_cooldown_status
+                cooldowns = get_global_cooldown_status()
+                if cooldowns:
+                    def _fmt_cd(secs: float) -> str:
+                        m = int(secs // 60)
+                        return f"{m // 60}h {m % 60:02d}m"
+                    cd_parts = [f"<b>{sym}</b> ({_fmt_cd(secs)} left)" for sym, secs, _ in cooldowns]
+                    lines += ["", f"⏳ On cooldown (4H): {', '.join(cd_parts)}"]
+            except Exception:
+                pass
+
             return "\n".join(lines)
 
 

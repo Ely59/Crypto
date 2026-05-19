@@ -358,6 +358,10 @@ MOMENTUM_SQ_SL_PCT          = 5.0
 MOMENTUM_SQ_TP1_PCT         = 8.0
 MOMENTUM_SQ_TP2_PCT         = 15.0
 
+# ─── Global per-coin cooldown (CHANGE 5A) ────────────────────────────────────
+MOMENTUM_GLOBAL_COOLDOWN_MIN       = 240     # 4H global cooldown per coin, across all signal types
+MOMENTUM_GLOBAL_SQ_EXCEPTION_PCT   = 10.0   # SQ exception fires if price moved > 10% since last alert
+
 # ─── Alert logging (FIX 6) ───────────────────────────────────────────────────
 ALERT_LOG_CSV = "logs/alert_log.csv"
 
