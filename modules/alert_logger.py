@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import csv
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from utils.logger import get_logger
@@ -117,6 +117,40 @@ def compute_hits_for_pending() -> None:
                 w.writerows(rows)
         except Exception as e:
             log.error(f"alert_logger: rewrite failed: {e}")
+
+
+def get_recent_alerts(hours: int = 24) -> list:
+    """
+    Return the best alert per coin from the last `hours` hours, sorted by score desc.
+    Used by the daily briefing to show yesterday's top signals (CHANGE 7C).
+    """
+    _ensure_csv()
+    try:
+        with open(cfg.ALERT_LOG_CSV, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return []
+
+    cutoff = datetime.now(tz=_BERLIN) - timedelta(hours=hours)
+    recent = []
+    for row in rows:
+        try:
+            ts = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M").replace(tzinfo=_BERLIN)
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            recent.append(row)
+
+    # Deduplicate: keep best-score entry per coin
+    seen: dict[str, dict] = {}
+    for row in recent:
+        coin = row.get("coin", "")
+        if not coin:
+            continue
+        prev = seen.get(coin)
+        if prev is None or int(row.get("score") or 0) > int(prev.get("score") or 0):
+            seen[coin] = row
+    return sorted(seen.values(), key=lambda r: -int(r.get("score") or 0))
 
 
 def get_weekly_stats(days: int = 7) -> dict:

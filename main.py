@@ -76,7 +76,11 @@ def run_daily_briefing():
         if coin.alert_level == 2:
             m4.send_scout_alert(coin, level=2)
 
-    m4.send_daily_briefing(btc_context, scout_results, avoid_coins)
+    # Update hit data then collect yesterday's top signals for the briefing (CHANGE 7C)
+    m_log.compute_hits_for_pending()
+    top_alerts = m_log.get_recent_alerts(hours=24)
+
+    m4.send_daily_briefing(btc_context, scout_results, avoid_coins, top_alerts=top_alerts)
 
     log.info("═══ Daily Briefing: complete ═══")
 

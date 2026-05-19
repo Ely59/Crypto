@@ -307,6 +307,20 @@ def get_cmc_listings(
 # Open interest:     total open contracts in BTC; rising OI = conviction, falling = unwinding
 # ─────────────────────────────────────────────────────────────────────────────
 
+def get_coingecko_global() -> Optional[dict]:
+    """
+    CoinGecko /global — BTC dominance, total market cap, Total3, 24h market change.
+    Returns the raw 'data' dict, or None on failure. Safe to call once per day.
+    """
+    try:
+        resp = requests.get(f"{COINGECKO_BASE_URL}/global", timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("data")
+    except Exception as e:
+        log.warning(f"CoinGecko /global fetch failed: {e}")
+        return None
+
+
 def get_btc_funding_rate() -> Optional[float]:
     """
     Latest perpetual funding rate for BTCUSDT from Binance Futures.

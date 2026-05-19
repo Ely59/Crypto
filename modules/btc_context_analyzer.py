@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from utils.api_client import (
     get_mexc_klines, get_mexc_price, get_fear_greed_index,
     get_btc_funding_rate, get_btc_long_short_ratio, get_btc_open_interest,
+    get_coingecko_global,
 )
 from utils.indicators import compute_rsi, compute_ema, compute_macd
 from utils.logger     import get_logger
@@ -126,6 +127,11 @@ class BTCContext:
     # ── Companion coins (populated by analyze(); None if fetch fails) ─────────
     eth: CoinContext | None = field(default=None)
     sol: CoinContext | None = field(default=None)
+
+    # ── Global macro (CoinGecko /global — CHANGE 7A) ──────────────────────────
+    btc_dominance:      float | None = field(default=None)  # BTC % of total market cap
+    total3_usd:         float | None = field(default=None)  # Total market ex BTC+ETH (USD)
+    market_cap_24h_pct: float | None = field(default=None)  # 24h change % in total market cap
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -386,6 +392,22 @@ def analyze() -> BTCContext | None:
     eth = _analyze_coin("ETH")
     sol = _analyze_coin("SOL")
 
+    # ── Step 6b: CoinGecko global macro (BTC.D, Total3) ──────────────────────
+    log.info("BTC Context Analyzer: fetching CoinGecko global macro…")
+    cg = get_coingecko_global()
+    if cg:
+        btc_pct        = cg.get("market_cap_percentage", {}).get("btc", 0.0)
+        eth_pct        = cg.get("market_cap_percentage", {}).get("eth", 0.0)
+        total_cap      = cg.get("total_market_cap", {}).get("usd", 0.0)
+        btc_dominance  = round(float(btc_pct), 2)
+        total3_usd     = round(float(total_cap) * (1.0 - btc_pct / 100.0 - eth_pct / 100.0))
+        market_cap_24h = cg.get("market_cap_change_percentage_24h_usd")
+        market_cap_24h = round(float(market_cap_24h), 2) if market_cap_24h is not None else None
+    else:
+        btc_dominance  = None
+        total3_usd     = None
+        market_cap_24h = None
+
     # ── Step 6: Fear & Greed ─────────────────────────────────────────────────
     fg_value, fg_label = _fetch_fear_greed()
 
@@ -425,6 +447,9 @@ def analyze() -> BTCContext | None:
         oi_rising          = oi_rising,
         eth                = eth,
         sol                = sol,
+        btc_dominance      = btc_dominance,
+        total3_usd         = total3_usd,
+        market_cap_24h_pct = market_cap_24h,
     )
 
 

@@ -419,20 +419,12 @@ def _build_recommendation(btc_context) -> list[str]:
         fg_note = "🤑  Extreme Greed — historically a time to reduce exposure."
 
     return [
-        "  <b>Signal Breakdown</b>",
-        "",
-        f"  {_dot(rsi_score)}  RSI ({rsi})        <b>{rsi_label}</b>  [{_fmt(rsi_score)}]",
-        f"  {_dot(vol_score)}  Volume Trend      <b>{vol_label}</b>  [{_fmt(vol_score)}]",
-        f"  {_dot(ema_score)}  EMA Cross         <b>{ema_label}</b>  [{_fmt(ema_score)}]",
-        f"  {_dot(macd_score)}  MACD              <b>{macd_label}</b>  [{_fmt(macd_score)}]",
-        "",
         f"  {bias_color}  <b>Score: {_fmt(total)} / 4  →  {bias_label}  {bias_tag}</b>",
         "",
-        "  Details:",
-        f"  · {rsi_detail}",
-        f"  · {vol_detail}",
-        f"  · {ema_detail}",
-        f"  · {macd_detail}",
+        f"  {_dot(rsi_score)}  RSI ({rsi})        <b>{rsi_label}</b>",
+        f"  {_dot(vol_score)}  Volume Trend      <b>{vol_label}</b>",
+        f"  {_dot(ema_score)}  EMA Cross         <b>{ema_label}</b>",
+        f"  {_dot(macd_score)}  MACD              <b>{macd_label}</b>",
         "",
         f"  {context}",
         f"  {caution}",
@@ -441,14 +433,50 @@ def _build_recommendation(btc_context) -> list[str]:
     ]
 
 
+def _macro_setup_line(btc_context) -> str:
+    """One-sentence macro summary from regime + BTC.D + Fear & Greed."""
+    regime = btc_context.regime
+    fg     = btc_context.fear_greed_value
+    btcd   = getattr(btc_context, "btc_dominance", None)
+
+    if regime == "BULL":
+        regime_part = "BTC is in a bullish regime"
+    elif regime == "BEAR":
+        regime_part = "BTC is in a bearish regime"
+    else:
+        regime_part = "BTC is consolidating"
+
+    if fg <= 25:
+        fg_part = "extreme fear dominating sentiment"
+    elif fg <= 40:
+        fg_part = "fear-driven sentiment"
+    elif fg <= 60:
+        fg_part = "neutral sentiment"
+    elif fg <= 75:
+        fg_part = "greed building in the market"
+    else:
+        fg_part = "extreme greed — caution warranted"
+
+    if btcd is not None:
+        if btcd > 58:
+            btcd_part = "BTC.D elevated — altcoins likely underperforming"
+        elif btcd < 55:
+            btcd_part = "BTC.D receding — altcoin season conditions forming"
+        else:
+            btcd_part = "BTC.D in neutral zone"
+        return f"{regime_part} with {fg_part}; {btcd_part}."
+    return f"{regime_part} with {fg_part}."
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Daily Briefing builder
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_daily_briefing(
-    btc_context,                   # BTCContext from Module 1 — required
-    setups:      list | None = None,      # list[CoinSetup] from Module 2 — placeholder until ready
-    avoid_coins: list | None = None,      # list[AvoidCoin] from Module 2 — placeholder until ready
+    btc_context,                      # BTCContext from Module 1 — required
+    setups:      list | None = None,  # list[CoinSetup] from Module 2
+    avoid_coins: list | None = None,  # list[AvoidCoin] from Module 2
+    top_alerts:  list | None = None,  # list[dict] from alert_logger — yesterday's top signals
 ) -> str:
     """
     Compose the full daily briefing message.
@@ -606,6 +634,53 @@ def build_daily_briefing(
     else:
         lines.append("  ⚫  Open Interest    <i>N/A</i>")
 
+    # BTC Dominance (7A)
+    btcd = getattr(btc_context, "btc_dominance", None)
+    if btcd is not None:
+        if btcd > 58:
+            btcd_dot  = "🔴"
+            btcd_note = "⚠️ Altcoin season unlikely"
+        elif btcd < 55:
+            btcd_dot  = "🟢"
+            btcd_note = "✅ Capital rotating to alts"
+        else:
+            btcd_dot  = "⚪"
+            btcd_note = "Neutral zone"
+        lines.append(f"  {btcd_dot}  BTC Dominance    <b>{btcd:.1f}%</b>  <i>({btcd_note})</i>")
+    else:
+        lines.append("  ⚫  BTC Dominance    <i>N/A</i>")
+
+    # ETHBTC Ratio (7A)
+    if btc_context.eth is not None and btc_context.btc_price and btc_context.btc_price > 0:
+        ethbtc     = btc_context.eth.price / btc_context.btc_price
+        eth_regime = getattr(btc_context.eth, "regime", None)
+        if eth_regime == "BULL":
+            ethbtc_dot  = "🟢"
+            ethbtc_note = "ETH outperforming"
+        elif eth_regime == "BEAR":
+            ethbtc_dot  = "🔴"
+            ethbtc_note = "ETH underperforming"
+        else:
+            ethbtc_dot  = "⚪"
+            ethbtc_note = "Neutral"
+        lines.append(f"  {ethbtc_dot}  ETH/BTC Ratio    <b>{ethbtc:.5f}</b>  <i>({ethbtc_note})</i>")
+    else:
+        lines.append("  ⚫  ETH/BTC Ratio    <i>N/A</i>")
+
+    # Total3 (7A)
+    t3    = getattr(btc_context, "total3_usd", None)
+    mc24h = getattr(btc_context, "market_cap_24h_pct", None)
+    if t3 is not None:
+        t3_b = t3 / 1e9
+        if mc24h is not None:
+            t3_arrow = "↑" if mc24h > 0 else "↓"
+            t3_pct   = f"  {t3_arrow} {abs(mc24h):.1f}% 24h"
+        else:
+            t3_pct = ""
+        lines.append(f"  📊  Total3           <b>${t3_b:,.0f}B</b>{t3_pct}")
+    else:
+        lines.append("  ⚫  Total3           <i>N/A</i>")
+
     lines.append("")
 
     # ── Section 3: Altcoin Watchlist ──────────────────────────────────────────
@@ -629,6 +704,36 @@ def build_daily_briefing(
                 f"     📈 RSI <b>{coin.rsi_4h}</b>  |  EMA Spread <b>{coin.ema_spread:.2f}%</b>",
                 "",
             ]
+    elif top_alerts:
+        lines += ["  🏆  <b>YESTERDAY'S TOP SIGNALS:</b>", ""]
+        for i, alert in enumerate(top_alerts[:3], 1):
+            sym      = alert.get("coin", "?")
+            sig_type = alert.get("signal_type", "?")
+            score    = alert.get("score", "?")
+            entry_p  = alert.get("price_at_alert", "")
+            roi_s    = alert.get("roi_percent", "")
+            hit_s    = alert.get("hit", "")
+            peak_s   = alert.get("4h_max_price", "")
+            try:
+                entry_f = _fmt_price(float(entry_p)) if entry_p else "?"
+            except (ValueError, TypeError):
+                entry_f = entry_p or "?"
+            lines.append(f"  {i}. <b>{sym}</b> — {score}/100 | {sig_type} | Entry: ${entry_f}")
+            if roi_s and hit_s:
+                try:
+                    roi_f  = float(roi_s)
+                    hit_ok = int(hit_s) == 1
+                    hit_sym = "✅" if hit_ok else "❌"
+                    try:
+                        peak_f = f"Peak ${_fmt_price(float(peak_s))}  " if peak_s else ""
+                    except (ValueError, TypeError):
+                        peak_f = ""
+                    lines.append(f"     Result: {peak_f}({roi_f:+.1f}%) {hit_sym}")
+                except (ValueError, TypeError):
+                    lines.append("     Result: <i>[check price]</i>")
+            else:
+                lines.append("     Result: <i>[check price]</i>")
+            lines.append("")
     else:
         lines += [
             "  ⏳  <i>No qualifying coins found today,</i>",
@@ -667,11 +772,13 @@ def build_daily_briefing(
         "",
     ]
 
-    # ── Section 6: Daily Recommendation ──────────────────────────────────────
+    # ── Section 6: Today's Macro Setup ──────────────────────────────────────
     lines += [
         "─────────────────────────────",
-        "💡  <b>DAILY RECOMMENDATION</b>",
+        "🌐  <b>TODAY'S MACRO SETUP</b>",
         "─────────────────────────────",
+        f"  {_macro_setup_line(btc_context)}",
+        "",
     ]
     lines += _build_recommendation(btc_context)
     lines += [""]
