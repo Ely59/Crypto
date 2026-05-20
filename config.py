@@ -230,8 +230,6 @@ MOMENTUM_WARN_RSI6_PCT         = 70.0   # RSI6 15m above this  → "RSI approach
 MOMENTUM_WARN_KDJ_J_PCT        = 70.0   # KDJ J 15m above this → "KDJ getting hot"
 MOMENTUM_WARN_VOL_LOW_PCT      = 150.0  # 4H vol% below this   → "Volume not exceptional"
 MOMENTUM_WARN_GAIN_LATE_PCT    = 10.0   # 1h gain above this   → "Late in momentum cycle"
-MOMENTUM_WARN_CIRC_LOW_PCT     = 50.0   # circ% below this     → "Dilution risk present"
-MOMENTUM_WARN_FDV_HIGH_RATIO   = 3.0    # FDV/MCap above this  → "High dilution risk"
 #
 # Kline fetch limits
 MOMENTUM_TA_4H_LIMIT      = 100    # 4H candles (covers EMA20 + KDJ + MACD warm-up)
@@ -239,6 +237,7 @@ MOMENTUM_TA_15M_LIMIT     = 60     # 15m candles (≈ 15 hours of data)
 MOMENTUM_TA_5M_LIMIT          = 60     # 60 × 5m = 5 hours of data for precision layer
 
 # ─── 5m precision layer thresholds ──────────────────────────────────────────
+MOMENTUM_5M_RSI_LOW           = 30.0   # 5m RSI below → not in entry range (GC gate)
 MOMENTUM_5M_RSI_HOT           = 75.0   # 5m RSI above → overheated (soft gate, downgrade STRONG→WATCH)
 MOMENTUM_5M_KDJ_MAX_PBW       = 30.0   # PBW: 5m KDJ J < 30 during accumulation
 MOMENTUM_5M_RSI_MAX_PBW       = 45.0   # PBW: 5m RSI6 < 45 confirmed
@@ -332,7 +331,23 @@ MOMENTUM_SC_TP2_PCT         = 15.0
 # ─── Fear Mode — Bear Market Relief (CHANGE 2A) ──────────────────────────────
 MOMENTUM_FEAR_FG_THRESHOLD    = 45     # F&G below this activates Fear Mode
 MOMENTUM_FEAR_EMA_SEP_MIN     = 0.05   # relaxed sep % (normal = 0.2%) compared vs tech.h4_ema_sep
-MOMENTUM_FEAR_RS_PCT          = 3.0    # relative strength vs BTC needed for EMA6>EMA20 bypass
+MOMENTUM_FEAR_RS_PCT          = 5.0    # relative strength vs BTC needed for EMA6>EMA20 bypass (was 3.0)
+MOMENTUM_FEAR_ATL_BUFFER_PCT  = 15.0  # Fear Mode: coin must be >15% above ATL to pass (normal = 5%)
+MOMENTUM_ATL_BUFFER_PCT       = 5.0   # Normal mode: coin must be >5% above ATL to pass
+MOMENTUM_FEAR_PD_VOL_MULT     = 8.0   # Fear Mode: P&D pre-filter vol multiplier (normal = 5×)
+MOMENTUM_PD_VOL_MULT          = 5.0   # Normal mode: P&D pre-filter vol multiplier
+MOMENTUM_PD_ATL_NEAR_PCT      = 20.0  # "near ATL" = price < ATL × (1 + this%) → pump-and-dump risk
+
+# ─── Speed Alert Track (⚡) ────────────────────────────────────────────────────
+MOMENTUM_SPEED_15M_GAIN_MIN   = 5.0   # 15m candle ≥ 5% to qualify
+MOMENTUM_SPEED_VOL_MULT       = 5.0   # 15m vol ≥ 5× avg prev-3
+MOMENTUM_SPEED_PRE_RSI_MAX    = 55.0  # RSI candle-before spike ≤ 55 (not already hot)
+MOMENTUM_SPEED_MCAP_MIN       = 10_000_000  # MCap ≥ $10M
+MOMENTUM_SPEED_ATL_BUFFER_PCT = 15.0  # price must be >15% above ATL
+MOMENTUM_SPEED_H4_EMA_MAX_NEG = -8.0  # 4H EMA spread (ema6-ema20)/ema20 must be > -8% (not deeply bearish)
+MOMENTUM_SPEED_SL_PCT         = 4.0   # Speed Alert stop-loss
+MOMENTUM_SPEED_TP1_PCT        = 5.0   # Speed Alert TP1
+MOMENTUM_SPEED_TP2_PCT        = 10.0  # Speed Alert TP2
 
 # ─── BB-Squeeze Bypass — Gate 2g (CHANGE 2B) ─────────────────────────────────
 MOMENTUM_SQUEEZE_EMA_SPREAD_MAX = 3.0  # abs spread between 4H EMA6 and EMA20 < 3% (compressed)
@@ -349,8 +364,6 @@ MOMENTUM_SQ_MIN_SCORE       = 65          # minimum score to fire alert
 MOMENTUM_SQ_BASE_SCORE      = 70          # starting score
 MOMENTUM_SQ_VOL_EXTREME     = 10.0        # 15m vol ≥ 10× → extreme vol bonus
 MOMENTUM_SQ_VOL_EXTREME_PTS = 10          # +10 pts for extreme vol spike
-MOMENTUM_SQ_ATH_DIST_BONUS  = 80.0        # ATH distance > 80% below 16D peak → distance bonus
-MOMENTUM_SQ_ATH_DIST_PTS    = 5           # +5 pts
 MOMENTUM_SQ_CIRC_BONUS_PCT  = 99.9        # circ ≥ ~100% → fully circulating bonus
 MOMENTUM_SQ_CIRC_BONUS_PTS  = 5           # +5 pts
 MOMENTUM_SQ_MCAP_BONUS_USD  = 50_000_000  # MCap > $50M → size-credibility bonus

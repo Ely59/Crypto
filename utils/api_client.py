@@ -323,10 +323,9 @@ def get_coingecko_global() -> Optional[dict]:
 
 def get_coingecko_ath_map(limit: int = 500) -> dict:
     """
-    Fetch true all-time high (ATH) price and date for the top `limit` coins.
-    Returns {SYMBOL_UPPER: {"ath": float, "ath_date": str}}.
-    Data comes from CoinGecko /coins/markets which uses the actual ATH, not a
-    rolling window — so FIDA shows $59.61, not the 16-day candle high.
+    Fetch ATH and ATL price data for the top `limit` coins.
+    Returns {SYMBOL_UPPER: {"ath": float, "ath_date": str, "atl": float, "atl_date": str}}.
+    Data comes from CoinGecko /coins/markets (actual ATH/ATL, not rolling window).
     """
     result: dict = {}
     per_page = 250
@@ -345,11 +344,18 @@ def get_coingecko_ath_map(limit: int = 500) -> dict:
             sym      = (coin.get("symbol") or "").upper()
             ath      = coin.get("ath")
             ath_date = coin.get("ath_date") or ""
+            atl      = coin.get("atl")
+            atl_date = coin.get("atl_date") or ""
             if sym and ath and float(ath) > 0:
-                result[sym] = {"ath": float(ath), "ath_date": ath_date}
+                result[sym] = {
+                    "ath":      float(ath),
+                    "ath_date": ath_date,
+                    "atl":      float(atl) if atl and float(atl) > 0 else 0.0,
+                    "atl_date": atl_date,
+                }
         if len(data) < per_page:
             break
-    log.info(f"CoinGecko ATH map: {len(result)} entries loaded")
+    log.info(f"CoinGecko ATH/ATL map: {len(result)} entries loaded")
     return result
 
 

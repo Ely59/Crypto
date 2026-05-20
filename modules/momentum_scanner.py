@@ -453,6 +453,22 @@ def _mark_sq_alerted(symbol: str) -> None:
         del _sq_alerted[k]
 
 
+# ── Speed Alert cooldown (⚡ SPEED track) ────────────────────────────────────
+_speed_alerted: dict[str, float] = {}
+_last_speed_count: int = 0
+
+
+def _on_speed_cooldown(symbol: str) -> bool:
+    return (time.time() - _speed_alerted.get(symbol, 0.0)) < 120 * 60  # 2H cooldown
+
+
+def _mark_speed_alerted(symbol: str) -> None:
+    _speed_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in _speed_alerted.items() if ts < stale]:
+        del _speed_alerted[k]
+
+
 # ── Global per-coin cooldown — CHANGE 5A ─────────────────────────────────────
 # Stores: symbol → (timestamp, rec_type, price_at_alert)
 _global_alerted: dict[str, tuple] = {}
@@ -937,6 +953,12 @@ def _lookup_ath(ath_map: dict, symbol: str, price: float,
     return fallback_dist, 0.0, ""
 
 
+def _lookup_atl(ath_map: dict, symbol: str) -> float:
+    """Return ATL price from CoinGecko map (0.0 if not available)."""
+    info = ath_map.get(symbol, {})
+    return float(info.get("atl") or 0)
+
+
 def _score_squeeze(tech: TechResult, mcap: float, circ_pct: float, has_inf_supply: bool) -> int:
     """
     Compute BB-Squeeze Breakout quality score (PART 3).
@@ -975,6 +997,67 @@ def _check_15m_fasttrack(mexc_symbol: str) -> bool:
     vol_last  = float(vol.iloc[-1])
     vol_prev3 = float(vol.iloc[-4:-1].mean()) if len(vol) >= 4 else vol_last
     return vol_prev3 > 0 and vol_last >= cfg.MOMENTUM_FT_15M_VOL_MULT * vol_prev3
+
+
+def _check_speed_alert(mexc_symbol: str) -> "dict | None":
+    """
+    Detect explosive 15m candle moves for the Speed Alert Track.
+    Returns dict with spike data or None if conditions not met.
+    Fields: candle_gain, vol_ratio, pre_rsi (second-to-last 15m RSI6 proxy), h4_ema_spread_pct
+    """
+    df = get_mexc_futures_klines(mexc_symbol, "15m", limit=25)
+    if df is None or len(df) < 10:
+        return None
+
+    closes = df["close"].astype(float)
+    opens  = df["open"].astype(float)
+    vols   = df["volume"].astype(float)
+
+    last_open  = float(opens.iloc[-1])
+    last_close = float(closes.iloc[-1])
+    candle_gain = (last_close - last_open) / last_open * 100.0 if last_open > 0 else 0.0
+    if candle_gain < cfg.MOMENTUM_SPEED_15M_GAIN_MIN:
+        return None
+
+    vol_last  = float(vols.iloc[-1])
+    vol_prev3 = float(vols.iloc[-4:-1].mean()) if len(vols) >= 4 else vol_last
+    if vol_prev3 <= 0:
+        return None
+    vol_ratio = vol_last / vol_prev3
+    if vol_ratio < cfg.MOMENTUM_SPEED_VOL_MULT:
+        return None
+
+    # Pre-spike RSI6 approximation: use RSI on second-to-last candle window
+    delta = closes.iloc[:-1].diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.rolling(6).mean()
+    avg_loss = loss.rolling(6).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-9)
+    rsi_series = 100 - 100 / (1 + rs)
+    pre_rsi = float(rsi_series.iloc[-1]) if len(rsi_series) >= 6 else 50.0
+    if pre_rsi > cfg.MOMENTUM_SPEED_PRE_RSI_MAX:
+        return None
+
+    # 4H EMA spread check (not deeply bearish)
+    df4h = get_mexc_futures_klines(mexc_symbol, "4h", limit=30)
+    h4_ema_spread_pct = 0.0
+    if df4h is not None and len(df4h) >= 20:
+        c4 = df4h["close"].astype(float)
+        ema6  = c4.ewm(span=6,  adjust=False).mean().iloc[-1]
+        ema20 = c4.ewm(span=20, adjust=False).mean().iloc[-1]
+        if ema20 > 0:
+            h4_ema_spread_pct = (ema6 - ema20) / ema20 * 100.0
+    if h4_ema_spread_pct < cfg.MOMENTUM_SPEED_H4_EMA_MAX_NEG:
+        return None
+
+    return {
+        "candle_gain":      round(candle_gain, 2),
+        "vol_ratio":        round(vol_ratio, 1),
+        "pre_rsi":          round(pre_rsi, 1),
+        "h4_ema_spread_pct": round(h4_ema_spread_pct, 3),
+        "price":            last_close,
+    }
 
 
 def scan() -> list[MomentumResult]:
@@ -1513,10 +1596,8 @@ def scan() -> list[MomentumResult]:
         _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
         gc_5m_warn = []
         if tech.m5_rsi6 > 0:
-            if not (35 <= tech.m5_rsi6 <= 72):
-                gc_5m_warn.append(f"⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
-            if not tech.m5_price_above_ema20:
-                gc_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+            if not (cfg.MOMENTUM_5M_RSI_LOW <= tech.m5_rsi6 <= cfg.MOMENTUM_5M_RSI_HOT):
+                gc_5m_warn.append("5m RSI out of range — wait for entry zone or reduce position size")
 
         log.info(
             f"  ⚡ GOLDEN CROSS  {symbol}  1h {change_1h:+.2f}%  "
@@ -1583,8 +1664,17 @@ def scan() -> list[MomentumResult]:
         tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
         if tech is None:
             continue
+        # P&D pre-filter: near ATL in bearish 4H → require doubled vol + mandatory warning
+        _vs_atl     = _lookup_atl(_ath_map, symbol)
+        _vs_near_atl = (_vs_atl > 0 and price <= _vs_atl * (1 + cfg.MOMENTUM_PD_ATL_NEAR_PCT / 100.0))
+        _vs_pd_active = _vs_near_atl and not tech.h4_ema_ok
+        _vs_pd_vol_mult = (cfg.MOMENTUM_FEAR_PD_VOL_MULT if _fear_mode else cfg.MOMENTUM_PD_VOL_MULT)
+
         if not tech.m15_vol_spike:
             log.debug(f"  VS skip {symbol}: vol ratio {tech.m15_vol_spike_ratio:.1f}× < {cfg.MOMENTUM_VS_VOL_MULT}×")
+            continue
+        if _vs_pd_active and tech.m15_vol_spike_ratio < _vs_pd_vol_mult:
+            log.info(f"  VS skip {symbol}: near ATL + bearish 4H, vol {tech.m15_vol_spike_ratio:.1f}× < {_vs_pd_vol_mult}× P&D threshold")
             continue
         if not tech.h4_ema_ok:
             log.debug(f"  VS skip {symbol}: 4H EMA bearish")
@@ -1593,14 +1683,11 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  VS skip {symbol}: RSI {tech.m15_rsi6:.1f} ≥ {cfg.MOMENTUM_VS_RSI_MAX}")
             continue
 
-        # 5m soft gate for VS
+        # 5m soft gate for VS (m5_note from _apply_5m_to_tech handles KDJ/RSI/EMA warnings)
         _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
         vs_5m_warn = []
-        if tech.m5_rsi6 > 0:
-            if not tech.m5_kdj_rising:
-                vs_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
-            if tech.m5_rsi6 >= 75:
-                vs_5m_warn.append(f"⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+        if _vs_near_atl:
+            vs_5m_warn.append("Near ATL in downtrend — pump-and-dump risk. Use 30% of normal margin only.")
 
         log.info(
             f"  ⚡ VOL SPIKE  {symbol}  1h {change_1h:+.2f}%  "
@@ -1706,9 +1793,9 @@ def scan() -> list[MomentumResult]:
         _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
         rb_5m_warn = []
         if not tech.m15_ema6_gt_ema12:
-            rb_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+            rb_5m_warn.append("15m EMA6 < EMA12 — momentum not confirmed")
         if tech.m5_rsi6 > 0 and not tech.m5_first_green:
-            rb_5m_warn.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+            rb_5m_warn.append("5m first green candle not confirmed — wait for entry zone")
 
         pullback_shown = (h24_high - current) / h24_high * 100
         log.info(
@@ -1814,15 +1901,18 @@ def scan() -> list[MomentumResult]:
             continue
 
         fund     = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
+        if fund.total < cfg.MOMENTUM_PBW_MIN_SCORE:
+            log.debug(f"  PBW skip {symbol}: score {fund.total} < {cfg.MOMENTUM_PBW_MIN_SCORE}")
+            continue
         has_inf  = _inf_supply_map.get(symbol, False)
         warnings = []
         if symbol in _micro_cap_set:
-            warnings.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
-            warnings.append("⚠️ Treat as high-risk, max 50% normal margin")
+            warnings.append(f"Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+            warnings.append("Treat as high-risk, max 50% normal margin")
         if has_inf:
-            warnings.append("⚠️ Max Supply unknown — inflation risk")
+            warnings.append("Max Supply unknown — inflation risk")
         if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
-            warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+            warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution risk")
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
             warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
 
@@ -1831,8 +1921,7 @@ def scan() -> list[MomentumResult]:
         pbw_m5_note = ""
         if m5_pbw is not None:
             if m5_pbw["kdj_j"] >= cfg.MOMENTUM_5M_KDJ_MAX_PBW or m5_pbw["rsi6"] >= cfg.MOMENTUM_5M_RSI_MAX_PBW:
-                pbw_m5_note = "⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position"
-                warnings.append(pbw_m5_note)
+                pbw_m5_note = "5m not ideal — wait for entry zone or reduce position size"
 
         log.info(
             f"  🔍 PRE-BREAKOUT  {symbol}  1h {change_1h:+.2f}%  "
@@ -1936,15 +2025,18 @@ def scan() -> list[MomentumResult]:
             continue
 
         fund    = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
+        if fund.total < cfg.MOMENTUM_SC_MIN_SCORE:
+            log.debug(f"  SC skip {symbol}: score {fund.total} < {cfg.MOMENTUM_SC_MIN_SCORE}")
+            continue
         has_inf = _inf_supply_map.get(symbol, False)
         warnings = []
         if symbol in _micro_cap_set:
-            warnings.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
-            warnings.append("⚠️ Treat as high-risk, max 50% normal margin")
+            warnings.append(f"Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+            warnings.append("Treat as high-risk, max 50% normal margin")
         if has_inf:
-            warnings.append("⚠️ Max Supply unknown — inflation risk")
+            warnings.append("Max Supply unknown — inflation risk")
         if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
-            warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+            warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution risk")
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
             warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
 
@@ -1952,9 +2044,9 @@ def scan() -> list[MomentumResult]:
         _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
         if tech.m5_rsi6 > 0:
             if tech.m5_vol_pct >= cfg.MOMENTUM_5M_VOL_MAX_SC * 100:
-                warnings.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+                warnings.append("5m volume too high — wait for pullback")
             if tech.m5_kdj_j >= cfg.MOMENTUM_5M_KDJ_MAX_SC:
-                warnings.append("⚠️ 5m noch nicht ideal — Entry-Zone abwarten oder kleinere Position")
+                warnings.append("5m KDJ J overheated — wait for entry zone")
 
         log.info(
             f"  🪜 STAIRCASE  {symbol}  1h {change_1h:+.2f}%  "
@@ -2022,19 +2114,18 @@ def scan() -> list[MomentumResult]:
 
         has_inf = _inf_supply_map.get(symbol, False)
         sq_warnings: list[str] = []
-        # 5m KDJ J > 50 confirmation (CHANGE 6B-SQ): warn if momentum not yet confirmed
         if sq_tech.m5_kdj_j > 0 and sq_tech.m5_kdj_j < 50:
             sq_warnings.append(
-                f"⚠️ 5m KDJ J {sq_tech.m5_kdj_j:.0f} < 50 — momentum building, "
+                f"5m KDJ J {sq_tech.m5_kdj_j:.0f} < 50 — momentum building, "
                 "wait for 5m confirmation before entry"
             )
         if symbol in _micro_cap_set:
-            sq_warnings.append(f"⚠️ Micro-Cap: ${mcap/1e6:.0f}M — half position size")
-            sq_warnings.append("⚠️ Treat as high-risk, max 50% normal margin")
+            sq_warnings.append(f"Micro-Cap: ${mcap/1e6:.0f}M — half position size")
+            sq_warnings.append("Treat as high-risk, max 50% normal margin")
         if has_inf:
-            sq_warnings.append("⚠️ Max Supply unknown — inflation risk")
+            sq_warnings.append("Max Supply unknown — inflation risk")
         if circ_pct > 0 and circ_pct < cfg.MOMENTUM_WARN_CIRC_ALERT_PCT:
-            sq_warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution-Risiko")
+            sq_warnings.append(f"Circ Rate: {circ_pct:.0f}% — Dilution risk")
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
             sq_warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
 
@@ -2072,14 +2163,87 @@ def scan() -> list[MomentumResult]:
             squeeze_bypass=True,
         ))
 
+    # ── Stage 2h: Speed Alert Track ⚡ ────────────────────────────────────────
+    speed_alerts: list[MomentumResult] = []
+    alerted_symbols_all = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts +
+                           vs_alerts + rb_alerts + pbw_alerts + sc_alerts + sq_alerts}
+    atl_buffer_pct = cfg.MOMENTUM_FEAR_ATL_BUFFER_PCT if _fear_mode else cfg.MOMENTUM_SPEED_ATL_BUFFER_PCT
+
+    for coin_data in coins:
+        sym    = (coin_data.get("symbol") or "").upper()
+        name   = coin_data.get("name") or sym
+        _q     = coin_data.get("quote", {}).get("USD", {})
+        mcap   = float(_q.get("market_cap")         or 0)
+        price  = float(_q.get("price")              or 0)
+        c24h   = float(_q.get("percent_change_24h") or 0)
+        c1h    = float(_q.get("percent_change_1h")  or 0)
+        vol24h = float(_q.get("volume_24h")         or 0)
+        mexc_sym = sym + "_USDT"
+
+        if sym in alerted_symbols_all:
+            continue
+        if mexc_sym not in futures_set:
+            continue
+        if mcap < cfg.MOMENTUM_SPEED_MCAP_MIN:
+            continue
+        if _on_speed_cooldown(sym):
+            continue
+        if _on_global_cooldown(sym, "SPEED ALERT", price):
+            continue
+
+        atl = _lookup_atl(_ath_map, sym)
+        if atl > 0 and price <= atl * (1 + atl_buffer_pct / 100.0):
+            log.debug(f"  SPEED skip {sym}: price within {atl_buffer_pct}% of ATL")
+            continue
+
+        spike = _check_speed_alert(mexc_sym)
+        if spike is None:
+            continue
+
+        log.info(
+            f"  ⚡ SPEED ALERT  {sym}  gain {spike['candle_gain']:+.1f}%  "
+            f"vol {spike['vol_ratio']:.1f}×  pre-RSI {spike['pre_rsi']:.0f}"
+        )
+
+        sp_entry = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price))
+        sp_sl    = round(sp_entry * (1 - cfg.MOMENTUM_SPEED_SL_PCT  / 100), _price_decimals(price))
+        sp_tp1   = round(sp_entry * (1 + cfg.MOMENTUM_SPEED_TP1_PCT / 100), _price_decimals(price))
+        sp_tp2   = round(sp_entry * (1 + cfg.MOMENTUM_SPEED_TP2_PCT / 100), _price_decimals(price))
+        sp_risk  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SPEED_SL_PCT  / 100, 2)
+        sp_rwd1  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SPEED_TP1_PCT / 100, 2)
+        sp_rwd2  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SPEED_TP2_PCT / 100, 2)
+
+        _sp_ath_dist, _sp_ath_price, _sp_ath_date = _lookup_ath(_ath_map, sym, price, 0.0)
+
+        speed_alerts.append(MomentumResult(
+            symbol=sym, name=name, price=round(price, 8),
+            change_1h=round(c1h, 2), change_24h=round(c24h, 2),
+            market_cap=mcap, volume_24h=vol24h,
+            fdv=0.0, fdv_mcap_ratio=0.0, circ_supply_pct=0.0,
+            mexc_symbol=mexc_sym,
+            recommendation="SPEED ALERT", rec_emoji="⚡",
+            warnings=["Spike-type — TP1 priority, no greed. Move is short and fast."],
+            entry_price=sp_entry, stop_loss=sp_sl, tp1=sp_tp1, tp2=sp_tp2,
+            sl_pct=cfg.MOMENTUM_SPEED_SL_PCT,
+            risk_usd=sp_risk, reward_tp1_usd=sp_rwd1, reward_tp2_usd=sp_rwd2,
+            rr_str=f"1:{sp_rwd1/sp_risk:.2f}",
+            ath_dist_pct=_sp_ath_dist, ath_price=_sp_ath_price, ath_date=_sp_ath_date,
+        ))
+        _mark_speed_alerted(sym)
+        _mark_global_alerted(sym, "SPEED ALERT", price)
+        alerted_symbols_all.add(sym)
+
+    global _last_speed_count
+    _last_speed_count = len(speed_alerts)
+
     # ── CHANGE 5B: Session-level dedup — one alert per coin per scan ────────────
     _DEDUP_PRIORITY = {
         "SQUEEZE": 8, "STRONG ENTRY": 7, "WATCH": 6, "RECOVERY": 5,
         "GOLDEN CROSS": 4, "STAIRCASE": 4, "VOLUME SPIKE": 3,
-        "PRE-BREAKOUT": 3, "EARLY SIGNAL": 2, "COOLING_DOWN": 1,
+        "PRE-BREAKOUT": 3, "SPEED ALERT": 3, "EARLY SIGNAL": 2, "COOLING_DOWN": 1,
     }
     _all_this_scan = (new_alerts + cooling_alerts + gc_alerts + vs_alerts +
-                      rb_alerts + pbw_alerts + sc_alerts + sq_alerts)
+                      rb_alerts + pbw_alerts + sc_alerts + sq_alerts + speed_alerts)
     _best_per_sym: dict[str, MomentumResult] = {}
     for _r in _all_this_scan:
         _prev = _best_per_sym.get(_r.symbol)
@@ -2108,6 +2272,7 @@ def scan() -> list[MomentumResult]:
     pbw_alerts     = [r for r in pbw_alerts     if id(r) in _keep_ids]
     sc_alerts      = [r for r in sc_alerts      if id(r) in _keep_ids]
     sq_alerts      = [r for r in sq_alerts      if id(r) in _keep_ids]
+    speed_alerts   = [r for r in speed_alerts   if id(r) in _keep_ids]
 
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
@@ -2118,15 +2283,18 @@ def scan() -> list[MomentumResult]:
     pbw     = len(pbw_alerts)
     sc_n    = len(sc_alerts)
     sq_n    = len(sq_alerts)
+    sp_n    = len(speed_alerts)
     cooling = len(cooling_alerts)
     log.info(
         f"Scan done — {len(candidates)} M1–M7, "
         f"{macro_blocked_count} macro-blocked, "
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
         f"{strong} STRONG + {watch} WATCH + {early} EARLY + "
-        f"{gc} GC + {vs} VS + {rb} RB + {pbw} PBW + {sc_n} SC + {sq_n} SQ + {cooling} COOLING alerts."
+        f"{gc} GC + {vs} VS + {rb} RB + {pbw} PBW + {sc_n} SC + {sq_n} SQ + "
+        f"{sp_n} SPEED + {cooling} COOLING alerts."
     )
-    return new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts + pbw_alerts + sc_alerts + sq_alerts
+    return (new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts +
+            pbw_alerts + sc_alerts + sq_alerts + speed_alerts)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -226,19 +226,47 @@ def _signal_chain_lines(coin) -> list[str]:
     else:
         m5_line = "5m:  ⚫ n/v"
 
-    # Entry zone — use 5m EMA20 when available (CHANGE 6C), else fall back to entry_price
-    ez_base = t.m5_ema20 if t.m5_ema20 > 0 else coin.entry_price
-    ez_lo   = ez_base * (1 - cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
-    ez_hi   = ez_base * (1 + cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
-    if t.m5_ema20 > 0:
-        zone_line = (
-            f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
-            f" (check 1m before placing order)"
-        )
-    else:
-        zone_line = f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}"
+    # MEXC alert levels — Breakout + Pullback, each with Entry/SL/TP1/TP2
+    # Derive SL/TP factors from existing coin levels (keeps signal-specific %s intact)
+    entry = coin.entry_price
+    sl_factor  = (coin.stop_loss / entry) if entry > 0 else (1 - coin.sl_pct / 100)
+    tp1_factor = (coin.tp1      / entry) if entry > 0 else 1.05
+    tp2_factor = (coin.tp2      / entry) if entry > 0 else 1.10
 
-    return ["", h4_line, m15_line, m5_line, zone_line, ""]
+    # Breakout level: 24H high × 1.005 (resistance just above recent peak)
+    bk_price = t.h24_high * 1.005 if t.h24_high > 0 else 0.0
+    bk_sl    = bk_price * sl_factor
+    bk_tp1   = bk_price * tp1_factor
+    bk_tp2   = bk_price * tp2_factor
+
+    # Pullback level: 5m EMA20 (current accumulation zone)
+    pb_price = t.m5_ema20 if t.m5_ema20 > 0 else 0.0
+    pb_sl    = pb_price * sl_factor
+    pb_tp1   = pb_price * tp1_factor
+    pb_tp2   = pb_price * tp2_factor
+
+    lines = ["", h4_line, m15_line, m5_line, ""]
+
+    if bk_price > 0:
+        lines += [
+            f"🔴 MEXC Alert — Breakout: {_fmt_price(bk_price)}",
+            f"   Entry {_fmt_price(bk_price)} | SL {_fmt_price(bk_sl)} | TP1 {_fmt_price(bk_tp1)} | TP2 {_fmt_price(bk_tp2)}",
+        ]
+    if pb_price > 0:
+        lines += [
+            f"🟢 MEXC Alert — Pullback: {_fmt_price(pb_price)}",
+            f"   Entry {_fmt_price(pb_price)} | SL {_fmt_price(pb_sl)} | TP1 {_fmt_price(pb_tp1)} | TP2 {_fmt_price(pb_tp2)}",
+            f"   (check 1m chart before placing order)",
+        ]
+    if bk_price == 0 and pb_price == 0:
+        # Fallback: show simple entry zone when no MEXC data
+        ez_base = entry
+        ez_lo   = ez_base * (1 - cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
+        ez_hi   = ez_base * (1 + cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
+        lines.append(f"→ Entry-Zone: {_fmt_price(ez_lo)} – {_fmt_price(ez_hi)}")
+
+    lines.append("")
+    return lines
 
 
 def _build_warning_lines(coin, is_squeeze: bool = False) -> list[str]:
@@ -1049,13 +1077,14 @@ def send_daily_briefing(
     btc_context,
     setups:      list | None = None,
     avoid_coins: list | None = None,
+    top_alerts:  list | None = None,
 ) -> bool:
     """
     Build and send the morning briefing.
-    Only btc_context is required; setups and avoid_coins show placeholders when absent.
+    Only btc_context is required; setups, avoid_coins, and top_alerts show placeholders when absent.
     """
     log.info("Building daily briefing…")
-    msg = build_daily_briefing(btc_context, setups, avoid_coins)
+    msg = build_daily_briefing(btc_context, setups, avoid_coins, top_alerts=top_alerts)
     ok  = send_message(msg)
     log.info("Daily briefing sent." if ok else "Daily briefing FAILED.")
     return ok
@@ -1542,10 +1571,10 @@ def build_staircase_alert(coin) -> str:
     score_str = str(coin.total_score) if coin.total_score > 0 else "—"
 
     lines = [
-        f"🪜 <b>STAIRCASE: {coin.symbol}</b> — Konsolidierung vor Leg 2",
-        f"4H Trend intakt | 15m Vol: {vol_pct} von MA10",
-        f"RSI abgekühlt: {rsi_val} | KDJ J: {kdj_val}",
-        f"Vorheriger Leg: +{coin.sc_prior_move:.1f}% ✅",
+        f"🪜 <b>STAIRCASE: {coin.symbol}</b> — Consolidation before Leg 2",
+        f"4H trend intact | 15m Vol: {vol_pct} of MA10",
+        f"RSI cooled: {rsi_val} | KDJ J: {kdj_val}",
+        f"Prior leg: +{coin.sc_prior_move:.1f}% ✅",
     ]
     lines += _signal_chain_lines(coin)
     lines += [
@@ -1633,6 +1662,38 @@ def send_squeeze_alert(coin) -> bool:
     return send_message(build_squeeze_alert(coin))
 
 
+def build_speed_alert(coin) -> str:
+    """
+    ⚡ Speed Alert — explosive 15m candle with high volume, bypasses 4H EMA gate.
+    """
+    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+
+    lines = [
+        f"⚡ <b>SPEED ALERT: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
+        "Explosive 15m candle detected — high-speed move in progress.",
+        "⚡ Act within <b>2 minutes</b> or skip — speed signals decay fast.",
+        "",
+        f"Entry:  <b>{_fmt_price(coin.entry_price)}</b>",
+        f"SL (-{coin.sl_pct:.0f}%):   <b>{_fmt_price(coin.stop_loss)}</b>",
+        f"TP1 (+{cfg.MOMENTUM_SPEED_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → exit 70% here",
+        f"TP2 (+{cfg.MOMENTUM_SPEED_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b> → trailing SL",
+        "",
+        f"MCap: {_vol_human(coin.market_cap)}",
+    ]
+    _sp_ath_l = _fmt_ath_line(coin)
+    if _sp_ath_l:
+        lines.append(_sp_ath_l)
+    lines += _build_warning_lines(coin)
+    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
+    return "\n".join(lines)
+
+
+def send_speed_alert(coin) -> bool:
+    """Send a Speed Alert to Telegram."""
+    log.info(f"Sending SPEED ALERT for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
+    return send_message(build_speed_alert(coin))
+
+
 def build_weekly_hitrate_report(stats: dict) -> str:
     """
     Weekly hit-rate report — sent every Sunday 09:00 Berlin.
@@ -1655,6 +1716,7 @@ def build_weekly_hitrate_report(stats: dict) -> str:
         "WATCH":         "🟡 Watch",
         "EARLY SIGNAL":  "🔍 Early Signal",
         "SQUEEZE":       "💥 BB-Squeeze",
+        "SPEED ALERT":   "⚡ Speed Alert",
     }
 
     lines = [
