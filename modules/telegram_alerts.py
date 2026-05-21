@@ -181,7 +181,8 @@ def _fmt_ath_line(coin) -> str:
 
 def _signal_chain_lines(coin) -> list[str]:
     """
-    Build the 4H/15m/5m signal chain block shown above the entry in all alerts.
+    Build the 5m → 15m → 4H signal chain block shown in all alerts.
+    5m is displayed first (primary trigger). 1H shown as context at the end.
     Returns a list of HTML lines (empty list if tech data unavailable).
     """
     t = coin.tech
@@ -191,12 +192,42 @@ def _signal_chain_lines(coin) -> list[str]:
     def ck(ok: bool) -> str:
         return "✅" if ok else "❌"
 
-    # 4H line — ✅ requires EMA stack AND RSI6 < 80
+    # ── 5m line (PRIMARY — shown first) ──────────────────────────────────────
+    if t.m5_rsi6 > 0:
+        ema_cross = getattr(t, 'm5_fresh_cross', False)
+        ema_above = getattr(t, 'm5_ema6_gt_ema20', t.m5_price_above_ema20)
+        vol_ratio  = round(t.m5_vol_pct / 100, 1) if t.m5_vol_pct > 0 else 0.0
+        m5_gate_ok = (ema_above or ema_cross) and (25 <= t.m5_rsi6 <= 75) and (t.m5_vol_pct >= 120)
+        cross_tag  = " cross↑" if ema_cross else ""
+        ema_sym    = "✅" if (ema_above or ema_cross) else "❌"
+        m5_line = (
+            f"5m:  {ck(m5_gate_ok)} EMA {ema_sym}{cross_tag}"
+            f" | RSI {t.m5_rsi6:.0f}"
+            f" | Vol {vol_ratio:.1f}× MA10"
+        )
+        if not m5_gate_ok and t.m5_note:
+            m5_line += f" ← {t.m5_note.split(' — ')[0].replace('⏳ ', '').replace('⚠️ ', '')}"
+    else:
+        m5_line = "5m:  ⚫ n/v"
+
+    # ── 15m line ──────────────────────────────────────────────────────────────
+    ema_ok_15m = t.m15_ema6_gt_ema12 if t.m15_ema6_gt_ema12 is not None else t.m15_ema_ok
+    if ema_ok_15m and t.m15_rsi6 < 78:
+        m15_line = f"15m: {ck(ema_ok_15m)} EMA bullish | RSI {t.m15_rsi6:.0f} | Vol {t.vol_pct:.0f}% MA10"
+    else:
+        concern = ""
+        if not ema_ok_15m:
+            concern = " EMA6 < EMA12"
+        if t.m15_rsi6 >= 78:
+            concern += f" RSI {t.m15_rsi6:.0f} — overheated"
+        m15_line = f"15m: {ck(ema_ok_15m and t.m15_rsi6 < 78)} {concern.strip() if concern else 'EMA bullish'} | RSI {t.m15_rsi6:.0f}"
+
+    # ── 4H line ───────────────────────────────────────────────────────────────
     macd_arrow = "↑" if t.h4_macd_ok else "↓"
     h4_rsi_str = f"RSI {t.h4_rsi6:.0f}" if t.h4_rsi6 > 0 else f"KDJ {t.h4_kdj_j:.0f}"
-    h4_rsi_ok  = t.h4_rsi6 <= 0 or t.h4_rsi6 < 80   # rsi6=0 → not computed, treat as ok
+    h4_rsi_ok  = t.h4_rsi6 <= 0 or t.h4_rsi6 < 80
     h4_ok      = t.h4_ema_ok and h4_rsi_ok
-    h4_line = f"4H:  {ck(h4_ok)} EMA bullish | {h4_rsi_str} | MACD {macd_arrow}"
+    h4_line    = f"4H:  {ck(h4_ok)} EMA bullish | {h4_rsi_str} | MACD {macd_arrow}"
     if not t.h4_ema_ok and getattr(t, 'h4_transitioning', False):
         h4_line = f"4H:  🔄 EMA transitioning | {h4_rsi_str} | 24H positive"
     elif not t.h4_ema_ok:
@@ -204,50 +235,29 @@ def _signal_chain_lines(coin) -> list[str]:
     elif not h4_rsi_ok:
         h4_line = f"4H:  ❌ EMA bullish | {h4_rsi_str} overheated | MACD {macd_arrow}"
 
-    # 15m line — ✅ requires EMA6>EMA12 AND RSI6 < 78
-    ema_ok_15m = t.m15_ema6_gt_ema12 if t.m15_ema6_gt_ema12 is not None else t.m15_ema_ok
-    if ema_ok_15m and t.m15_rsi6 < 78:
-        m15_line = f"15m: {ck(ema_ok_15m)} EMA bullish | RSI {t.m15_rsi6:.0f} | Vol {t.vol_pct:.0f}% MA10"
-    else:
-        concern = ""
-        if not ema_ok_15m:
-            concern = f" EMA6 < EMA12"
-        if t.m15_rsi6 >= 78:
-            concern += f" RSI {t.m15_rsi6:.0f} — overheated"
-        m15_line = f"15m: {ck(ema_ok_15m and t.m15_rsi6 < 78)} {concern.strip() if concern else 'EMA bullish'} | RSI {t.m15_rsi6:.0f}"
+    # ── Context line (1H as info only — never gates signals) ─────────────────
+    c1h  = getattr(coin, 'change_1h',  0.0)
+    c24h = getattr(coin, 'change_24h', 0.0)
+    context_line = f"📊 Context: 1H {c1h:+.2f}% | 24H {c24h:+.2f}%"
 
-    # 5m line
-    if t.m5_rsi6 > 0:
-        kdj_arrow = "↑" if t.m5_kdj_rising else "↓"
-        px_sym    = "&gt;" if t.m5_price_above_ema20 else "&lt;"
-        m5_overall_ok = t.m5_ok
-        m5_line = (f"5m:  {ck(m5_overall_ok)} KDJ J: {t.m5_kdj_j:.0f}{kdj_arrow}"
-                   f" | RSI {t.m5_rsi6:.0f} | Price {px_sym} EMA20")
-        if not m5_overall_ok and t.m5_note:
-            m5_line += f" ← {t.m5_note.split(' — ')[0].replace('⏳ ', '').replace('⚠️ ', '')}"
-    else:
-        m5_line = "5m:  ⚫ n/v"
-
-    # MEXC alert levels — Breakout + Pullback, each with Entry/SL/TP1/TP2
-    # Derive SL/TP factors from existing coin levels (keeps signal-specific %s intact)
-    entry = coin.entry_price
+    # ── MEXC alert levels — Breakout + Pullback ───────────────────────────────
+    entry      = coin.entry_price
     sl_factor  = (coin.stop_loss / entry) if entry > 0 else (1 - coin.sl_pct / 100)
     tp1_factor = (coin.tp1      / entry) if entry > 0 else 1.05
     tp2_factor = (coin.tp2      / entry) if entry > 0 else 1.10
 
-    # Breakout level: 24H high × 1.005 (resistance just above recent peak)
     bk_price = t.h24_high * 1.005 if t.h24_high > 0 else 0.0
     bk_sl    = bk_price * sl_factor
     bk_tp1   = bk_price * tp1_factor
     bk_tp2   = bk_price * tp2_factor
 
-    # Pullback level: 5m EMA20 (current accumulation zone)
     pb_price = t.m5_ema20 if t.m5_ema20 > 0 else 0.0
     pb_sl    = pb_price * sl_factor
     pb_tp1   = pb_price * tp1_factor
     pb_tp2   = pb_price * tp2_factor
 
-    lines = ["", h4_line, m15_line, m5_line, ""]
+    # Order: 5m → 15m → 4H → context
+    lines = ["", m5_line, m15_line, h4_line, context_line, ""]
 
     if bk_price > 0:
         lines += [
@@ -261,7 +271,6 @@ def _signal_chain_lines(coin) -> list[str]:
             f"   (check 1m chart before placing order)",
         ]
     if bk_price == 0 and pb_price == 0:
-        # Fallback: show simple entry zone when no MEXC data
         ez_base = entry
         ez_lo   = ez_base * (1 - cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)
         ez_hi   = ez_base * (1 + cfg.MOMENTUM_ENTRY_ZONE_PCT / 100)

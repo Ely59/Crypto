@@ -139,9 +139,10 @@ LOG_FILE  = "logs/crypto_ecosystem.log"
 MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com"  # Futures/perp API (no key needed)
 
 # 1h momentum gate
-MOMENTUM_ZONE_MIN            = 1.0    # minimum 1h gain % to qualify — M1 filter  (was 1.5)
-MOMENTUM_ZONE_MAX            = 15.0   # maximum 1h gain % — fast pumps hit GC at 10-15%  (was 12.0)
-MOMENTUM_EARLY_EXIT_PCT      = -2.0   # CMC loop break — extended for Staircase signal (was 0.5)
+MOMENTUM_ZONE_MIN            = 1.0    # kept for scoring reference only — no longer a Stage 1 gate
+MOMENTUM_ZONE_MAX            = 15.0   # kept for scoring reference only — no longer a Stage 1 gate
+MOMENTUM_1H_MIN_MOVEMENT     = 0.3    # Stage 1 break: CMC loop stops when 1H < 0.3%
+MOMENTUM_EARLY_EXIT_PCT      = 0.3    # alias — same as MOMENTUM_1H_MIN_MOVEMENT (legacy compat)
 
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M standard minimum — micro-cap bypass below
@@ -241,8 +242,14 @@ MOMENTUM_5M_RSI_LOW           = 30.0   # 5m RSI below → not in entry range (GC
 MOMENTUM_5M_RSI_HOT           = 75.0   # 5m RSI above → overheated (soft gate, downgrade STRONG→WATCH)
 MOMENTUM_5M_KDJ_MAX_PBW       = 30.0   # PBW: 5m KDJ J < 30 during accumulation
 MOMENTUM_5M_RSI_MAX_PBW       = 45.0   # PBW: 5m RSI6 < 45 confirmed
-MOMENTUM_5M_VOL_MAX_SC        = 0.25   # SC: 5m vol < 25% of MA10
+MOMENTUM_5M_VOL_MAX_SC        = 0.25   # SC: 5m vol < 25% of MA10 (legacy; replaced by 5M_VOL_MAX_CONSOL)
 MOMENTUM_5M_KDJ_MAX_SC        = 35.0   # SC: 5m KDJ J < 35
+
+# ─── Unified 5m Gate (primary trigger — replaces per-signal 1H gates) ────────
+MOMENTUM_5M_GATE_RSI_MIN      = 25.0   # 5m RSI6 lower bound (not deeply oversold)
+MOMENTUM_5M_GATE_RSI_MAX      = 75.0   # 5m RSI6 upper bound (not overbought)
+MOMENTUM_5M_GATE_VOL_MIN      = 1.2    # 5m vol must be ≥ 1.2× MA10 (active interest)
+MOMENTUM_SC_5M_VOL_MAX_CONSOL = 0.40   # SC: prior 9-candle avg vol < 40% MA10 (consolidation check)
 
 # ─── Per-signal cooldowns (CHANGE B) ──────────────────────────────────────────
 MOMENTUM_RB_COOLDOWN_MIN      = 180    # Recovery Bounce: 3h (was 2h — avoid chasing noise)
@@ -321,7 +328,7 @@ MOMENTUM_SC_RSI_MAX         = 55.0   # 15m RSI6 must be < 55
 MOMENTUM_SC_RSI_STRICT      = 45.0   # EITHER gate: RSI < 45 alone satisfies consolidation
 MOMENTUM_SC_KDJ_MAX         = 50.0   # 15m KDJ J must be < 50
 MOMENTUM_SC_KDJ_STRICT      = 35.0   # EITHER gate: KDJ J < 35 alone satisfies consolidation
-MOMENTUM_SC_PRIOR_MOVE_MIN  = 6.0    # 24H high must be ≥6% above current (prior leg)
+MOMENTUM_SC_PRIOR_MOVE_MIN  = 4.0    # 24H high must be ≥4% above current (prior leg)
 MOMENTUM_SC_RSI_MAX_FEAR    = 62.0   # Fear Mode: relax RSI threshold to 62
 MOMENTUM_SC_VOL_MAX_FEAR    = 0.45   # Fear Mode: relax vol threshold to 45%
 MOMENTUM_SC_SL_PCT          = 5.0

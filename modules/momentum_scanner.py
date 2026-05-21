@@ -217,9 +217,12 @@ class TechResult:
     m5_kdj_rising:        bool  = False
     m5_price_above_ema20: bool  = False
     m5_ema6_gt_ema12:     bool  = False
+    m5_ema6_gt_ema20:     bool  = False   # EMA6 above EMA20 on 5m
+    m5_fresh_cross:       bool  = False   # fresh 5m EMA6/EMA20 cross (was below 3 candles ago)
     m5_first_green:       bool  = False
     m5_vol_pct:           float = 0.0
-    m5_ema20:             float = 0.0    # 5m EMA20 price — used for entry zone (CHANGE 6C)
+    m5_vol_recent_pct:    float = 0.0    # avg of prior 9 5m candles / MA10 (SC consolidation)
+    m5_ema20:             float = 0.0    # 5m EMA20 price — used for entry zone
     m5_ok:                bool  = False
     m5_note:              str   = ""
 
@@ -865,7 +868,7 @@ def _check_5m_pbw(mexc_symbol: str, fear_mode: bool = False) -> "dict | None":
 def _check_5m(mexc_symbol: str) -> "dict | None":
     """
     Fetch 5m candles and compute precision-layer indicators.
-    Returns a plain dict (soft gate data only — never used to block alerts).
+    Returns a plain dict used both for soft gate display and the unified 5m primary gate.
     """
     df_5m = get_mexc_futures_klines(mexc_symbol, "5m", limit=cfg.MOMENTUM_TA_5M_LIMIT)
     if df_5m is None or len(df_5m) < 20:
@@ -895,15 +898,29 @@ def _check_5m(mexc_symbol: str) -> "dict | None":
     vol_ma10 = float(vol_s.rolling(10).mean().iloc[-1])
     m5_vol_pct = (vol_last / vol_ma10 * 100.0) if vol_ma10 > 0 else 0.0
 
+    # Fresh EMA6/EMA20 cross: was below 3 candles ago, now above
+    m5_fresh_cross = (
+        len(ema6_s) >= 3 and
+        float(ema6_s.iloc[-3]) < float(ema20_s.iloc[-3]) and
+        m5_ema6 > m5_ema20
+    )
+
+    # Background volume level: avg of prior 9 candles (excludes trigger candle)
+    vol_prior9     = float(vol_s.iloc[-10:-1].mean()) if len(vol_s) >= 10 else vol_last
+    vol_recent_pct = (vol_prior9 / vol_ma10 * 100.0) if vol_ma10 > 0 else 100.0
+
     return {
         "rsi6":               round(m5_rsi6, 2),
         "kdj_j":              round(m5_kdj_j, 2),
         "kdj_rising":         m5_kdj_rising,
         "price_above_ema20":  m5_price > m5_ema20,
         "ema6_gt_ema12":      m5_ema6 > m5_ema12,
+        "ema6_gt_ema20":      m5_ema6 > m5_ema20,
+        "fresh_cross":        m5_fresh_cross,
         "first_green":        m5_price > m5_open_last,
         "vol_pct":            round(m5_vol_pct, 1),
-        "ema20":              m5_ema20,   # raw float for entry zone (CHANGE 6C)
+        "vol_recent_pct":     round(vol_recent_pct, 1),
+        "ema20":              m5_ema20,   # raw float for entry zone
     }
 
 
@@ -919,6 +936,19 @@ def _price_decimals(price: float) -> int:
         return 7
 
 
+def _base_5m_gate_ok(m5: "dict | None") -> bool:
+    """
+    Unified 5m primary gate — replaces per-signal 1H gates.
+    Passes if: (EMA6 > EMA20 OR fresh cross) AND RSI 25-75 AND vol >= 1.2× MA10.
+    """
+    if m5 is None:
+        return False
+    ema_ok = m5["ema6_gt_ema20"] or m5["fresh_cross"]
+    rsi_ok = cfg.MOMENTUM_5M_GATE_RSI_MIN <= m5["rsi6"] <= cfg.MOMENTUM_5M_GATE_RSI_MAX
+    vol_ok = m5["vol_pct"] >= cfg.MOMENTUM_5M_GATE_VOL_MIN * 100
+    return ema_ok and rsi_ok and vol_ok
+
+
 def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
     """Populate TechResult 5m fields from _check_5m() result (mutates in place)."""
     if m5 is None:
@@ -928,8 +958,11 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
     tech.m5_kdj_rising        = m5["kdj_rising"]
     tech.m5_price_above_ema20 = m5["price_above_ema20"]
     tech.m5_ema6_gt_ema12     = m5["ema6_gt_ema12"]
+    tech.m5_ema6_gt_ema20     = m5.get("ema6_gt_ema20", False)
+    tech.m5_fresh_cross       = m5.get("fresh_cross", False)
     tech.m5_first_green       = m5["first_green"]
     tech.m5_vol_pct           = m5["vol_pct"]
+    tech.m5_vol_recent_pct    = m5.get("vol_recent_pct", 100.0)
     tech.m5_ema20             = m5.get("ema20", 0.0)
     # Evaluate 5m overall health — all three required for ✅
     if m5["rsi6"] >= cfg.MOMENTUM_5M_RSI_HOT:
@@ -1187,14 +1220,8 @@ def scan() -> list[MomentumResult]:
         f"{len(futures_set)} MEXC perps cached."
     )
 
-    # ── Stage 1: M1–M7 ───────────────────────────────────────────────────────
-    candidates     = []   # 1-15% 1H gain — main scoring pipeline
-    gc_candidates  = []   # 0.5-8% 1H gain — Golden Cross pipeline
-    vs_candidates  = []   # 1-8%  1H gain — Volume Spike pipeline
-    rb_candidates  = []   # 2-8%  1H gain + 24H negative — Recovery Bounce pipeline
-    pbw_candidates = []   # 1-8%  1H gain — Pre-Breakout Watch pipeline
-    sc_candidates  = []   # -2% to +4% 1H gain — Staircase Continuation pipeline
-    ft_candidates  = []   # below ZONE_MIN — pending 15m fast-track check
+    # ── Stage 1: M1–M7 (unified candidates — 5m primary architecture) ───────────
+    candidates: list = []   # all coins with 1H ≥ 0.3% passing M2–M7; all pipelines share this
     _inf_supply_map: dict[str, bool] = {}   # symbol → has infinite supply
     _micro_cap_set:  set[str] = set()       # symbols that bypassed via micro-cap Vol/MC rule
 
@@ -1212,19 +1239,17 @@ def scan() -> list[MomentumResult]:
         tags   = [t.lower() for t in (coin.get("tags") or [])]
         q      = coin.get("quote", {}).get("USD", {})
 
-        change_1h      = q.get("percent_change_1h")  or 0.0
-        change_24h     = q.get("percent_change_24h") or 0.0
-        vol_change_24h = q.get("volume_change_24h")  or 0.0
-        price          = q.get("price")              or 0.0
-        mcap           = q.get("market_cap")         or 0.0
-        vol_24h        = q.get("volume_24h")         or 0.0
+        change_1h  = q.get("percent_change_1h")  or 0.0
+        change_24h = q.get("percent_change_24h") or 0.0
+        price      = q.get("price")              or 0.0
+        mcap       = q.get("market_cap")         or 0.0
+        vol_24h    = q.get("volume_24h")         or 0.0
 
-        if change_1h < cfg.MOMENTUM_EARLY_EXIT_PCT:
-            break   # CMC sorted desc — break once below SC minimum
-        if change_1h > cfg.MOMENTUM_ZONE_MAX:
-            continue   # parabolic — skip all pipelines
+        # CMC sorted descending by 1H gain — stop once below the minimum
+        if change_1h < cfg.MOMENTUM_1H_MIN_MOVEMENT:
+            break
 
-        # M2: Market cap (1A — micro-cap bypass: $10M-$25M allowed if Vol/MC > 150%)
+        # M2: Market cap (micro-cap bypass: $10M-$25M allowed if Vol/MC > 150%)
         if mcap > cfg.MOMENTUM_MCAP_MAX_USD:
             _s1_mcap_blocked += 1
             continue
@@ -1237,7 +1262,7 @@ def scan() -> list[MomentumResult]:
             _s1_mcap_blocked += 1
             continue
 
-        # M3: Volume (1B — bypass $5M absolute floor if Vol/MC > 150%; block dead coins < 20%)
+        # M3: Volume (bypass $5M absolute floor if Vol/MC > 150%; block dead coins < 20%)
         if vol_mc_ratio < cfg.MOMENTUM_VOLMC_DEAD_MAX:      # dead coin — no interest
             _s1_vol_blocked += 1
             continue
@@ -1245,7 +1270,7 @@ def scan() -> list[MomentumResult]:
             _s1_vol_blocked += 1
             continue
 
-        # M4: Supply (1D — inf-supply coins bypass circ% gate, get mandatory warning instead)
+        # M4: Supply (inf-supply coins bypass circ% gate, get mandatory warning instead)
         has_inf_supply = coin.get("max_supply") is None
         circ_pct = _resolve_circ_pct(coin)
         if not has_inf_supply and circ_pct < cfg.MOMENTUM_CIRC_SUPPLY_MIN_PCT:
@@ -1274,75 +1299,16 @@ def scan() -> list[MomentumResult]:
         if is_micro_cap:
             _micro_cap_set.add(symbol)
 
-        # Pipeline assignment (before vol_change_24h filter — SC skips it)
-        in_main = cfg.MOMENTUM_ZONE_MIN <= change_1h <= cfg.MOMENTUM_ZONE_MAX          # 1.5-12%
-        in_gc   = cfg.MOMENTUM_GC_1H_MIN <= change_1h <= cfg.MOMENTUM_GC_1H_MAX          # 0.5-8%
-        in_vs   = cfg.MOMENTUM_VS_1H_MIN <= change_1h <= cfg.MOMENTUM_VS_1H_MAX          # 1-8%
-        in_rb   = (cfg.MOMENTUM_RB_1H_MIN <= change_1h <= cfg.MOMENTUM_RB_1H_MAX         # 2-8%
-                   and change_24h < -3.0)
-        in_pbw  = cfg.MOMENTUM_PBW_1H_MIN <= change_1h <= cfg.MOMENTUM_PBW_1H_MAX        # 1-8%
-        in_sc   = (cfg.MOMENTUM_SC_1H_MIN <= change_1h <= cfg.MOMENTUM_SC_1H_MAX         # -2% to +4%
-                   and change_24h > 3.0)                                                  # had positive 24H
-
-        # Fast-track collection (1C): coin below ZONE_MIN that passes M2-M7
-        # 15m candle spike check runs after Stage 1 completes (avoid per-coin API calls in loop)
-        if change_1h < cfg.MOMENTUM_ZONE_MIN and not in_sc:
-            ft_candidates.append((
-                symbol, name, matched_tags, mexc_symbol,
-                price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct,
-            ))
-
-        # M3 24H volume spike filter — required for all pipelines EXCEPT Staircase
-        # (SC candidates consolidate with low volume after the spike)
-        if not in_sc:
-            if vol_change_24h < (cfg.MOMENTUM_VOL_SPIKE_MIN - 1.0) * 100:
-                continue
-
         entry_tuple = (
             symbol, name, matched_tags, mexc_symbol,
             price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct,
         )
-        if in_main:
-            log.info(
-                f"  M1–M7 ✓  {symbol:<10}  1h {change_1h:+.2f}%  "
-                f"MCap ${mcap/1e6:.0f}M  Vol ${vol_24h/1e6:.0f}M  "
-                f"FDV/MC {fdv_ratio:.1f}×  [{matched_tags[0]}]"
-            )
-            candidates.append(entry_tuple)
-        if in_gc:
-            if not in_main:
-                log.info(f"  GC cand  {symbol:<10}  1h {change_1h:+.2f}%  [{matched_tags[0]}]")
-            gc_candidates.append(entry_tuple)
-        if in_vs and not in_main:
-            log.info(f"  VS cand  {symbol:<10}  1h {change_1h:+.2f}%  [{matched_tags[0]}]")
-            vs_candidates.append(entry_tuple)
-        if in_rb:
-            rb_candidates.append(entry_tuple)
-        if in_pbw and not in_main and not in_vs:
-            log.debug(f"  PBW cand {symbol:<10}  1h {change_1h:+.2f}%  [{matched_tags[0]}]")
-            pbw_candidates.append(entry_tuple)
-        if in_sc:
-            log.debug(f"  SC cand  {symbol:<10}  1h {change_1h:+.2f}%  24h {change_24h:+.1f}%")
-            sc_candidates.append(entry_tuple)
-
-    # ── Fast-track: check 15m spike for below-ZONE_MIN coins (CHANGE 1C) ────────
-    _fast_track_count = 0
-    _candidates_syms  = {e[0] for e in candidates}
-    for ft_entry in ft_candidates:
-        sym_ft = ft_entry[0]
-        if sym_ft in _candidates_syms:
-            continue   # already in main pipeline via another path
-        mex_ft = ft_entry[3]
-        chg_ft = ft_entry[5]
-        mc_ft  = ft_entry[7]
-        if _check_15m_fasttrack(mex_ft):
-            _fast_track_count += 1
-            _candidates_syms.add(sym_ft)
-            candidates.append(ft_entry)
-            log.info(
-                f"  ⚡ FAST-TRACK  {sym_ft:<10}  1h {chg_ft:+.2f}%  "
-                f"MCap ${mc_ft/1e6:.0f}M — 15m spike bypasses 1H filter"
-            )
+        log.info(
+            f"  M1–M7 ✓  {symbol:<10}  1h {change_1h:+.2f}%  24h {change_24h:+.1f}%  "
+            f"MCap ${mcap/1e6:.0f}M  Vol ${vol_24h/1e6:.0f}M  "
+            f"FDV/MC {fdv_ratio:.1f}×  [{matched_tags[0]}]"
+        )
+        candidates.append(entry_tuple)
 
     # Stage 1 filter breakdown — logged every scan for pipeline analysis
     log.info(
@@ -1350,19 +1316,22 @@ def scan() -> list[MomentumResult]:
         f"MCap-block={_s1_mcap_blocked} | Vol-block={_s1_vol_blocked} | "
         f"Supply-block={_s1_supply_blocked} | FDV-block={_s1_fdv_blocked} | "
         f"Tags-block={_s1_tags_blocked} | MEXC-block={_s1_mexc_blocked} | "
-        f"MicroCap-allowed={len(_micro_cap_set)} | "
-        f"FastTrack={_fast_track_count}/{len(ft_candidates)}"
+        f"MicroCap-allowed={len(_micro_cap_set)}"
     )
 
     global _last_m1m7_count, _last_macro_blocked, _last_scan_outcomes, _last_rb_watchlist
     _last_scan_outcomes = []
     _last_rb_watchlist  = []
     _last_m1m7_count = len(candidates)
-    log.info(
-        f"Stage 1: {len(candidates)} M1–M7, {len(gc_candidates)} GC, "
-        f"{len(vs_candidates)} VS, {len(rb_candidates)} RB, "
-        f"{len(pbw_candidates)} PBW, {len(sc_candidates)} SC candidates."
-    )
+    log.info(f"Stage 1: {len(candidates)} unified candidates (1H ≥ {cfg.MOMENTUM_1H_MIN_MOVEMENT}%).")
+
+    # ── 5m pre-fetch: cache for all candidates before Stage 2 ─────────────────
+    _m5_cache: dict[str, "dict | None"] = {}
+    for _cand in candidates:
+        _msym = _cand[3]   # mexc_symbol at index 3
+        if _msym not in _m5_cache:
+            _m5_cache[_msym] = _check_5m(_msym)
+    log.info(f"5m pre-fetch: {len(_m5_cache)} symbols, {sum(1 for v in _m5_cache.values() if v is not None)} with data.")
 
     # ── Stages 2 + 3: TA gate + full scoring ─────────────────────────────────
     scored:              list[MomentumResult] = []
@@ -1501,8 +1470,15 @@ def scan() -> list[MomentumResult]:
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "DEAD_ZONE", f"Vol {tech.vol_pct:.0f}% of MA10 + only {change_1h:.1f}% 1H", tech.vol_pct, tech.h4_kdj_j))
             continue
 
-        # 5m soft gate — fetch and populate tech.m5_* (never blocks)
-        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        # 5m primary gate — use pre-fetched cache (replaces 1H gate)
+        _m5 = _m5_cache.get(mexc_symbol)
+        if not _base_5m_gate_ok(_m5):
+            log.debug(f"  5m gate ✗  {symbol}: gate failed (EMA/RSI/vol)")
+            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "MACRO_BLOCKED", "5m gate: EMA/RSI/vol not aligned", tech.vol_pct, tech.h4_kdj_j))
+            continue
+
+        # Populate tech.m5_* from cache
+        _apply_5m_to_tech(tech, _m5)
 
         # Fundamental bonus
         fund = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
@@ -1667,7 +1643,7 @@ def scan() -> list[MomentumResult]:
     gc_alerts: list[MomentumResult] = []
     alerted_this_scan = {r.symbol for r in new_alerts}
 
-    for entry in gc_candidates:
+    for entry in candidates:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
@@ -1680,27 +1656,24 @@ def scan() -> list[MomentumResult]:
             log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — GC blocked")
             continue
 
-        # Graduated vol threshold: 0.5-0.8% uses GC floor, 0.8-5% uses early-detection floor
-        gc_vol_threshold = (cfg.MOMENTUM_VOL_GC_MIN if change_1h < cfg.MOMENTUM_GC_EARLY_1H_MIN
-                            else cfg.MOMENTUM_VOL_EARLY_MIN)
-        tech = _check_technicals(mexc_symbol, gc_vol_threshold)
+        # Base 5m gate (primary trigger — replaces 1H gate)
+        _m5_gc = _m5_cache.get(mexc_symbol)
+        if not _base_5m_gate_ok(_m5_gc):
+            continue
+
+        tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
         if tech is None:
             continue
 
         if not tech.m15_golden_cross:
             continue
-        if not tech.h4_ema_ok:
-            log.debug(f"  GC skip {symbol}: 4H EMA bearish")
-            continue
+        # 4H EMA gate removed — 5m gate is primary
         if tech.m15_rsi6 >= cfg.MOMENTUM_GC_RSI_MAX:
-            log.debug(f"  GC skip {symbol}: RSI {tech.m15_rsi6:.1f} >= {cfg.MOMENTUM_GC_RSI_MAX}")
-            continue
-        if not tech.vol_ok:
-            log.debug(f"  GC skip {symbol}: vol {tech.vol_pct:.0f}% < {gc_vol_threshold*100:.0f}%")
+            log.debug(f"  GC skip {symbol}: 15m RSI {tech.m15_rsi6:.1f} >= {cfg.MOMENTUM_GC_RSI_MAX}")
             continue
 
-        # 5m soft gate for GC
-        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        # Populate 5m fields from cache
+        _apply_5m_to_tech(tech, _m5_gc)
         gc_5m_warn = []
         if tech.m5_rsi6 > 0:
             if not (cfg.MOMENTUM_5M_RSI_LOW <= tech.m5_rsi6 <= cfg.MOMENTUM_5M_RSI_HOT):
@@ -1755,7 +1728,7 @@ def scan() -> list[MomentumResult]:
     vs_alerts: list[MomentumResult] = []
     alerted_symbols = {r.symbol for r in new_alerts + gc_alerts}
 
-    for entry in vs_candidates:
+    for entry in candidates:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
@@ -1768,30 +1741,33 @@ def scan() -> list[MomentumResult]:
             log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — VS blocked")
             continue
 
+        # Base 5m gate (primary trigger)
+        _m5_vs = _m5_cache.get(mexc_symbol)
+        if not _base_5m_gate_ok(_m5_vs):
+            continue
+
         tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
         if tech is None:
             continue
-        # P&D pre-filter: near ATL in bearish 4H → require doubled vol + mandatory warning
-        _vs_atl     = _lookup_atl(_ath_map, symbol)
+        # P&D pre-filter: near ATL → require doubled vol + mandatory warning
+        _vs_atl      = _lookup_atl(_ath_map, symbol)
         _vs_near_atl = (_vs_atl > 0 and price <= _vs_atl * (1 + cfg.MOMENTUM_PD_ATL_NEAR_PCT / 100.0))
-        _vs_pd_active = _vs_near_atl and not tech.h4_ema_ok
+        _vs_pd_active = _vs_near_atl  # no 4H EMA requirement in new arch
         _vs_pd_vol_mult = (cfg.MOMENTUM_FEAR_PD_VOL_MULT if _fear_mode else cfg.MOMENTUM_PD_VOL_MULT)
 
         if not tech.m15_vol_spike:
             log.debug(f"  VS skip {symbol}: vol ratio {tech.m15_vol_spike_ratio:.1f}× < {cfg.MOMENTUM_VS_VOL_MULT}×")
             continue
         if _vs_pd_active and tech.m15_vol_spike_ratio < _vs_pd_vol_mult:
-            log.info(f"  VS skip {symbol}: near ATL + bearish 4H, vol {tech.m15_vol_spike_ratio:.1f}× < {_vs_pd_vol_mult}× P&D threshold")
+            log.info(f"  VS skip {symbol}: near ATL, vol {tech.m15_vol_spike_ratio:.1f}× < {_vs_pd_vol_mult}× P&D threshold")
             continue
-        if not tech.h4_ema_ok:
-            log.debug(f"  VS skip {symbol}: 4H EMA bearish")
-            continue
+        # 4H EMA gate removed — 5m gate is primary
         if tech.m15_rsi6 >= cfg.MOMENTUM_VS_RSI_MAX:
-            log.debug(f"  VS skip {symbol}: RSI {tech.m15_rsi6:.1f} ≥ {cfg.MOMENTUM_VS_RSI_MAX}")
+            log.debug(f"  VS skip {symbol}: 15m RSI {tech.m15_rsi6:.1f} ≥ {cfg.MOMENTUM_VS_RSI_MAX}")
             continue
 
-        # 5m soft gate for VS (m5_note from _apply_5m_to_tech handles KDJ/RSI/EMA warnings)
-        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        # Populate 5m fields from cache
+        _apply_5m_to_tech(tech, _m5_vs)
         vs_5m_warn = []
         if _vs_near_atl:
             vs_5m_warn.append("Near ATL in downtrend — pump-and-dump risk. Use 30% of normal margin only.")
@@ -1844,17 +1820,25 @@ def scan() -> list[MomentumResult]:
     rb_alerts: list[MomentumResult] = []
     alerted_symbols = {r.symbol for r in new_alerts + gc_alerts + vs_alerts}
 
-    for entry in rb_candidates:
+    for entry in candidates:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
         if symbol in alerted_symbols:
+            continue
+        # RB requires recent 24H decline (moved from Stage 1 into pipeline)
+        if change_24h >= -3.0:
             continue
         if _on_rb_cooldown(symbol):
             log.debug(f"  RB COOLDOWN: {symbol}")
             continue
         if _on_global_cooldown(symbol, "RECOVERY", price):
             log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — RB blocked")
+            continue
+
+        # Base 5m gate (primary trigger)
+        _m5_rb = _m5_cache.get(mexc_symbol)
+        if not _base_5m_gate_ok(_m5_rb):
             continue
 
         tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_SLOW_MIN)
@@ -1875,7 +1859,7 @@ def scan() -> list[MomentumResult]:
             log.debug(f"  RB skip {symbol}: h24_high {h24_high:.4g} not 12%+ above current {current:.4g}")
             continue
 
-        # Track near-miss for /recovery command (peak confirmed, may still fail pullback/KDJ)
+        # Track near-miss for /recovery command
         _last_rb_watchlist.append(RBWatchItem(
             symbol       = symbol,
             change_1h    = round(change_1h, 2),
@@ -1889,15 +1873,13 @@ def scan() -> list[MomentumResult]:
         if not real_pullback:
             log.debug(f"  RB skip {symbol}: pullback only {(h24_high - current)/h24_high*100:.1f}% < 8%")
             continue
-        if not tech.h4_ema_ok:
-            log.debug(f"  RB skip {symbol}: 4H EMA bearish")
-            continue
+        # 4H EMA gate removed — 5m gate is primary; keep KDJ check (spec: 4H KDJ < 110)
         if tech.h4_kdj_j >= cfg.MOMENTUM_RB_KDJ_MAX:
             log.debug(f"  RB skip {symbol}: 4H KDJ {tech.h4_kdj_j:.1f} ≥ {cfg.MOMENTUM_RB_KDJ_MAX} (not cooled)")
             continue
 
-        # 5m soft gate for RB + 15m EMA6>EMA12 check
-        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
+        # Populate 5m fields + 15m EMA diagnostic
+        _apply_5m_to_tech(tech, _m5_rb)
         rb_5m_warn = []
         if not tech.m15_ema6_gt_ema12:
             rb_5m_warn.append("15m EMA6 < EMA12 — momentum not confirmed")
@@ -1957,7 +1939,7 @@ def scan() -> list[MomentumResult]:
     pbw_alerts: list[MomentumResult] = []
     alerted_symbols = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts}
 
-    for entry in pbw_candidates:
+    for entry in candidates:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
@@ -2075,11 +2057,14 @@ def scan() -> list[MomentumResult]:
     sc_alerts: list[MomentumResult] = []
     alerted_symbols = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts + pbw_alerts}
 
-    for entry in sc_candidates:
+    for entry in candidates:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
         if symbol in alerted_symbols:
+            continue
+        # SC requires positive 24H trend (moved from Stage 1 into pipeline)
+        if change_24h <= 3.0:
             continue
         if _on_sc_cooldown(symbol):
             continue
@@ -2087,29 +2072,42 @@ def scan() -> list[MomentumResult]:
             log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — SC blocked")
             continue
 
+        # Base 5m gate — fresh 5m cross signals the new leg starting
+        _m5_sc = _m5_cache.get(mexc_symbol)
+        if not _base_5m_gate_ok(_m5_sc):
+            continue
+
         tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_SLOW_MIN)
         if tech is None:
             continue
-        if not tech.h4_ema_ok:
-            log.debug(f"  SC skip {symbol}: 4H EMA bearish")
+        # SC requires 4H EMA bullish OR transitioning (per spec)
+        h4_transition_ok_sc = (tech.h4_ema6 > tech.h4_ema12 and
+                               tech.h4_ema6 > tech.h4_ema20 and change_24h > 0)
+        if not (tech.h4_ema_ok or h4_transition_ok_sc):
+            log.debug(f"  SC skip {symbol}: 4H EMA bearish, no transition")
             continue
 
-        # Consolidation checks — apply fear-mode overrides, log diagnostics, then filter
-        current       = tech.m15_price
+        # Consolidation checks — 5m replaces 15m vol filter
+        current        = tech.m15_price
         prior_move_pct = (tech.h24_high - current) / current * 100 if current > 0 else 0.0
+        sc_rsi_limit   = cfg.MOMENTUM_SC_RSI_MAX_FEAR if _fear_mode else cfg.MOMENTUM_SC_RSI_MAX
 
-        sc_vol_limit = cfg.MOMENTUM_SC_VOL_MAX_FEAR if _fear_mode else cfg.MOMENTUM_SC_VOL_MAX
-        sc_rsi_limit = cfg.MOMENTUM_SC_RSI_MAX_FEAR if _fear_mode else cfg.MOMENTUM_SC_RSI_MAX
+        # 5m background vol consolidation check (replaces 15m vol < 35%)
+        _m5_sc_vol_recent = _m5_sc.get("vol_recent_pct", 100.0) if _m5_sc else 100.0
+        _sc_vol_consol_limit = cfg.MOMENTUM_SC_5M_VOL_MAX_CONSOL * 100
 
         log.info(
             f"  SC diag {symbol} — "
-            f"vol%MA10: {tech.vol_pct:.0f}% (need <{sc_vol_limit*100:.0f}%) | "
-            f"RSI6: {tech.m15_rsi6:.1f} (need <{sc_rsi_limit}) | "
+            f"5m-vol-prior: {_m5_sc_vol_recent:.0f}% (need <{_sc_vol_consol_limit:.0f}%) | "
+            f"15m RSI6: {tech.m15_rsi6:.1f} (need <{sc_rsi_limit}) | "
             f"KDJ J: {tech.m15_kdj_j:.1f} (need <{cfg.MOMENTUM_SC_KDJ_MAX}, strict<{cfg.MOMENTUM_SC_KDJ_STRICT}) | "
-            f"prior move: {prior_move_pct:.1f}% (need ≥{cfg.MOMENTUM_SC_PRIOR_MOVE_MIN}%)"
+            f"prior move: {prior_move_pct:.1f}% (need ≥{cfg.MOMENTUM_SC_PRIOR_MOVE_MIN}%) | "
+            f"24H: {change_24h:+.1f}%"
         )
 
-        if tech.vol_pct >= sc_vol_limit * 100:
+        # 5m background vol must be low (consolidation); current candle was the trigger (handled by base gate)
+        if _m5_sc_vol_recent >= _sc_vol_consol_limit:
+            log.debug(f"  SC skip {symbol}: 5m background vol {_m5_sc_vol_recent:.0f}% >= {_sc_vol_consol_limit:.0f}% (not consolidating)")
             continue
         if tech.m15_rsi6 >= sc_rsi_limit:
             continue
@@ -2125,7 +2123,7 @@ def scan() -> list[MomentumResult]:
             )
             continue
 
-        # Prior move: 24H high must be ≥6% above current price (confirms previous leg)
+        # Prior move: 24H high must be ≥4% above current price (confirms previous leg)
         prior_move_ok = tech.h24_high >= current * (1.0 + cfg.MOMENTUM_SC_PRIOR_MOVE_MIN / 100.0)
         if not prior_move_ok:
             log.debug(f"  SC skip {symbol}: 24H high only {prior_move_pct:.1f}% above current (need {cfg.MOMENTUM_SC_PRIOR_MOVE_MIN}%)")
@@ -2147,13 +2145,10 @@ def scan() -> list[MomentumResult]:
         if fdv_ratio > cfg.MOMENTUM_WARN_FDV_ALERT_RATIO:
             warnings.append(f"FDV/MCap: {fdv_ratio:.1f}×")
 
-        # 5m soft gate for SC
-        _apply_5m_to_tech(tech, _check_5m(mexc_symbol))
-        if tech.m5_rsi6 > 0:
-            if tech.m5_vol_pct >= cfg.MOMENTUM_5M_VOL_MAX_SC * 100:
-                warnings.append("5m volume too high — wait for pullback")
-            if tech.m5_kdj_j >= cfg.MOMENTUM_5M_KDJ_MAX_SC:
-                warnings.append("5m KDJ J overheated — wait for entry zone")
+        # Populate 5m fields from cache
+        _apply_5m_to_tech(tech, _m5_sc)
+        if tech.m5_kdj_j >= cfg.MOMENTUM_5M_KDJ_MAX_SC:
+            warnings.append("5m KDJ J overheated — wait for entry zone")
 
         log.info(
             f"  🪜 STAIRCASE  {symbol}  1h {change_1h:+.2f}%  "
@@ -2217,7 +2212,12 @@ def scan() -> list[MomentumResult]:
             log.info(f"  GLOBAL COOLDOWN (4H): {symbol} — SQ blocked (exception not met)")
             continue
 
-        _apply_5m_to_tech(sq_tech, _check_5m(mexc_symbol))
+        # Base 5m gate for SQ (use cache, fall back to fresh fetch if not pre-fetched)
+        _m5_sq = _m5_cache.get(mexc_symbol) or _check_5m(mexc_symbol)
+        if not _base_5m_gate_ok(_m5_sq):
+            log.debug(f"  SQ skip {symbol}: 5m gate not met")
+            continue
+        _apply_5m_to_tech(sq_tech, _m5_sq)
 
         has_inf = _inf_supply_map.get(symbol, False)
         sq_warnings: list[str] = []
@@ -2348,15 +2348,7 @@ def scan() -> list[MomentumResult]:
     _all_alerted_syms = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts +
                          vs_alerts + rb_alerts + pbw_alerts + sc_alerts + sq_alerts + speed_alerts}
 
-    # Candidate pool: union of gc_candidates (0.5-8%) + candidates (1.5-12%) → 0.5-12%
-    _seen_egc: set[str] = set()
-    _early_gc_source: list = []
-    for _e in gc_candidates + candidates:
-        if _e[0] not in _seen_egc:
-            _seen_egc.add(_e[0])
-            _early_gc_source.append(_e)
-
-    for entry in _early_gc_source:
+    for entry in candidates:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
