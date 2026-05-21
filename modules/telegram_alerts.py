@@ -280,6 +280,217 @@ def _signal_chain_lines(coin) -> list[str]:
     return lines
 
 
+_SEP = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+
+def _fmt_price_dollar(price: float) -> str:
+    """Format price with $ prefix and tiered decimal precision. Never strips trailing zeros."""
+    if price <= 0:
+        return "$0.00"
+    if price >= 10:
+        return f"${price:.4f}"
+    elif price >= 1:
+        return f"${price:.5f}"
+    elif price >= 0.1:
+        return f"${price:.5f}"
+    elif price >= 0.01:
+        return f"${price:.6f}"
+    elif price >= 0.001:
+        return f"${price:.7f}"
+    else:
+        return f"${price:.8f}"
+
+
+def _score_emoji(score: int) -> str:
+    if score >= 90:
+        return "🔥"
+    elif score >= 80:
+        return "✅"
+    elif score >= 65:
+        return "👁️"
+    return ""
+
+
+def _auto_sentence(coin, sector: str) -> str:
+    """Auto-generated summary sentence for line 3 of the unified alert."""
+    ath_dist = getattr(coin, 'ath_dist_pct', 0.0)
+    circ_pct = getattr(coin, 'circ_supply_pct', 0.0)
+    rec      = coin.recommendation
+    t        = coin.tech
+
+    tf_parts: list[str] = []
+    if t is not None and t.m5_rsi6 > 0:
+        m5_ema = getattr(t, 'm5_ema6_gt_ema20', False) or getattr(t, 'm5_fresh_cross', False)
+        if m5_ema and 25 <= t.m5_rsi6 <= 75 and t.m5_vol_pct >= 120:
+            tf_parts.append("5m")
+    if t is not None and t.m15_rsi6 > 0:
+        if t.m15_ema6_gt_ema12 and t.m15_rsi6 < 78:
+            tf_parts.append("15m")
+    if t is not None:
+        if t.h4_ema_ok or getattr(t, 'h4_transitioning', False) or getattr(t, 'h4_method_b', False):
+            tf_parts.append("4H")
+
+    if len(tf_parts) >= 3:
+        tf_str = ", ".join(tf_parts[:-1]) + " and " + tf_parts[-1]
+    elif len(tf_parts) == 2:
+        tf_str = tf_parts[0] + " and " + tf_parts[1]
+    elif len(tf_parts) == 1:
+        tf_str = tf_parts[0]
+    else:
+        tf_str = "multiple timeframes"
+
+    circ_part = f", {circ_pct:.0f}% supply in circulation" if circ_pct > 0 else ""
+    ath_part  = f"{ath_dist:.0f}% below ATH" if ath_dist > 0 else "near ATH"
+
+    if rec == "SPEED ALERT":
+        return f"{sector} coin, {ath_part}. 5m explosive move detected — act fast."
+    elif rec == "GOLDEN CROSS":
+        return f"{sector} coin, {ath_part}{circ_part}. 15m EMA golden cross — {tf_str} aligned."
+    elif rec == "EARLY GC":
+        return f"{sector} coin, {ath_part}{circ_part}. 5m EMA cross detected — early entry signal."
+    elif rec == "VOLUME SPIKE":
+        return f"{sector} coin, {ath_part}{circ_part}. {tf_str} aligned — volume spike confirmed."
+    elif rec == "RECOVERY":
+        return f"{sector} coin, {ath_part}{circ_part}. {tf_str} aligned — recovery bounce confirmed."
+    elif rec == "STAIRCASE":
+        return f"{sector} coin, {ath_part}{circ_part}. {tf_str} aligned — staircase continuation confirmed."
+    elif rec == "PRE-BREAKOUT":
+        return f"{sector} coin, {ath_part}{circ_part}. 5m EMA compressed — breakout watch active."
+    elif rec == "SQUEEZE":
+        return f"{sector} coin, {ath_part}{circ_part}. EMA compression breaking out — squeeze confirmed."
+    elif rec == "LEG_CONTINUATION":
+        leg_num = getattr(coin, 'leg_number', 2)
+        return f"{sector} coin, {ath_part}{circ_part}. {tf_str} aligned — Leg {leg_num} continuation confirmed."
+    else:
+        return f"{sector} coin, {ath_part}{circ_part}. {tf_str} aligned — {rec.lower()} confirmed."
+
+
+def build_unified_alert(coin) -> str:
+    """
+    Universal 15-line alert format for ALL signal types (MASTER PROMPT Part E).
+
+    LINE 1:  icon COIN — RECOMMENDATION score/100 emoji
+    LINE 2:  ━━━━ separator
+    LINE 3:  "auto-generated sentence"
+    LINE 4:  empty
+    LINES 5-8: 📌 SET MEXC ALERTS with Breakout + Pullback levels
+    LINE 9:  empty
+    LINE 10: 📊  5m ✅/❌  15m ✅/❌  4H ✅/❌
+    LINE 11: ⚠️ warnings (max 3, only if present)
+    LINE 12: empty
+    LINE 13: MCap $XM | ATH -X% | Circ X%
+    LINE 14: ━━━━ separator
+    LINE 15: COIN_USDT  MEXC Futures (linked)
+    """
+    t   = coin.tech
+    rec = coin.recommendation
+
+    # ── Sector label ──────────────────────────────────────────────────────────
+    try:
+        from modules.momentum_scanner import category_label
+        sector = category_label(coin)
+    except Exception:
+        tags   = getattr(coin, 'matched_tags', None) or []
+        sector = tags[0].replace("-", " ").title() if tags else "Crypto"
+
+    # ── Line 1: Header ────────────────────────────────────────────────────────
+    _NO_SCORE_RECS = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE",
+                      "RECOVERY", "SPEED ALERT", "EARLY GC"}
+    has_score = rec not in _NO_SCORE_RECS and coin.total_score > 0
+    if has_score:
+        s_em  = _score_emoji(coin.total_score)
+        line1 = f"{coin.rec_emoji} <b>{coin.symbol}</b> — {rec} {coin.total_score}/100{s_em}"
+    else:
+        line1 = f"{coin.rec_emoji} <b>{coin.symbol}</b> — {rec}"
+
+    # ── Line 3: Auto-sentence ─────────────────────────────────────────────────
+    sentence = _auto_sentence(coin, sector)
+
+    # ── Lines 5-8: MEXC Alerts ────────────────────────────────────────────────
+    entry = coin.entry_price or coin.price or 0.0
+    if entry > 0:
+        sl_fac  = coin.stop_loss / entry if coin.stop_loss > 0 else (1 - coin.sl_pct / 100)
+        tp1_fac = coin.tp1       / entry if coin.tp1 > 0       else 1.10
+        tp2_fac = coin.tp2       / entry if coin.tp2 > 0       else 1.20
+    else:
+        sl_fac, tp1_fac, tp2_fac = 0.94, 1.10, 1.20
+
+    bk_price = entry
+    bk_sl    = bk_price * sl_fac
+    bk_tp1   = bk_price * tp1_fac
+    bk_tp2   = bk_price * tp2_fac
+
+    pb_ema20 = (t.m5_ema20 if (t and t.m5_ema20 > 0 and t.m5_ema20 < entry * 0.999) else 0.0)
+    pb_price = pb_ema20 if pb_ema20 > 0 else entry * 0.97
+    pb_sl    = pb_price * sl_fac
+    pb_tp1   = pb_price * tp1_fac
+    pb_tp2   = pb_price * tp2_fac
+
+    fd = _fmt_price_dollar
+    mexc_block = [
+        "📌 <b>SET MEXC ALERTS:</b>",
+        f"🔴 Breakout  {fd(bk_price)}",
+        f"   SL {fd(bk_sl)} | TP1 {fd(bk_tp1)} | TP2 {fd(bk_tp2)}",
+        f"🟢 Pullback  {fd(pb_price)}",
+        f"   SL {fd(pb_sl)} | TP1 {fd(pb_tp1)} | TP2 {fd(pb_tp2)}",
+        "   (verify 1m before placing)",
+    ]
+
+    # ── Line 10: Status row ───────────────────────────────────────────────────
+    def ck(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
+    if t is not None and t.m5_rsi6 > 0:
+        m5_ema_ok = (getattr(t, 'm5_ema6_gt_ema20', False) or
+                     getattr(t, 'm5_fresh_cross', False))
+        m5_ok = m5_ema_ok and (25 <= t.m5_rsi6 <= 75) and (t.m5_vol_pct >= 120)
+    else:
+        m5_ok = False
+    m15_ok = bool(t and t.m15_ema6_gt_ema12 and t.m15_rsi6 < 78)
+    h4_ok  = bool(t and (t.h4_ema_ok or getattr(t, 'h4_transitioning', False)
+                         or getattr(t, 'h4_method_b', False)))
+
+    status_row = f"📊  5m {ck(m5_ok)}  15m {ck(m15_ok)}  4H {ck(h4_ok)}"
+
+    # ── Line 11: Warnings (max 3, joined by |) ────────────────────────────────
+    all_warnings: list[str] = []
+    m5_note = getattr(coin, 'm5_note', '') or (t.m5_note if t else '')
+    if m5_note:
+        all_warnings.append(m5_note)
+    for w in (coin.warnings or []):
+        if w not in all_warnings:
+            all_warnings.append(w)
+    all_warnings = all_warnings[:3]
+    warning_line = ("⚠️ " + " | ".join(all_warnings)) if all_warnings else ""
+
+    # ── Line 13: Metadata ─────────────────────────────────────────────────────
+    ath_dist = getattr(coin, 'ath_dist_pct', 0.0)
+    circ_pct = getattr(coin, 'circ_supply_pct', 0.0)
+    mcap_str = _vol_human(coin.market_cap) if coin.market_cap > 0 else "—"
+    meta_line = f"MCap {mcap_str} | ATH -{ath_dist:.0f}% | Circ {circ_pct:.0f}%"
+
+    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+
+    # ── Assemble ──────────────────────────────────────────────────────────────
+    lines: list[str] = [line1, _SEP, f'"{sentence}"']
+
+    if rec == "SPEED ALERT":
+        lines.append("⚡ FAST MOVE — act within 10 minutes")
+
+    lines.append("")
+    lines.extend(mexc_block)
+    lines.append("")
+    lines.append(status_row)
+    if warning_line:
+        lines.append(warning_line)
+    lines.append("")
+    lines.append(meta_line)
+    lines.append(_SEP)
+    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol}  MEXC Futures</a>')
+
+    return "\n".join(lines)
+
+
 def _build_warning_lines(coin, is_squeeze: bool = False) -> list[str]:
     """
     Assemble warning block in canonical order:
@@ -1179,97 +1390,8 @@ def send_entry_alert(entry) -> bool:
 
 
 def build_momentum_alert(coin) -> str:
-    """
-    Telegram alert for a coin that scored ≥ 65/100 (STRONG ENTRY or WATCH).
-
-    Exact format specified by user:
-      [emoji] [COIN] +X% (1H) — [RECOMMENDATION]
-      📊 TECHNICAL: X/60
-      4H Trend / KDJ / 15m EMA / RSI / KDJ / MACD / Volume
-      💎 FUNDAMENTAL: X/40
-      🎯 TOTAL SCORE: X/100
-      📋 ACTION: Entry / SL / TP1 / TP2 / R/R
-      ⚠️ RISKS (auto-generated, max 3)
-      MEXC link
-    """
-    from modules.momentum_scanner import _PTS_MAX, _FUND_MAX
-    t = coin.tech
-    f = coin.fund
-
-    def ck(ok: bool) -> str:
-        return "✅" if ok else "❌"
-
-    tech_score = t.score if t is not None else 0
-    fund_score = f.total if f is not None else 0
-
-    lines = [
-        f"{coin.rec_emoji} <b>{coin.symbol}</b> {coin.change_1h:+.2f}% (1H) — <b>{coin.recommendation}</b>",
-    ]
-    if coin.recommendation == "EARLY SIGNAL":
-        lines.append("<i>Move just starting — tighter SL advised</i>")
-
-    if t is not None:
-        kdj_note = (f" ⚠️ {t.h4_kdj_j:.0f}" if not t.h4_kdj_ok else f" {t.h4_kdj_j:.0f}")
-        lines += [
-            "",
-            f"📊 <b>TECHNICAL: {tech_score}/{_PTS_MAX}</b>",
-            "",
-            f"4H Trend: {ck(t.h4_ema_ok)} | 4H KDJ:{kdj_note}",
-            "",
-            f"15m EMA: {ck(t.m15_ema_ok)} | RSI: {ck(t.m15_rsi6_ok)} {t.m15_rsi6:.1f}",
-            "",
-            f"KDJ: {ck(t.m15_kdj_ok)} J={t.m15_kdj_j:.1f} | MACD: {ck(t.m15_macd_ok)}",
-            "",
-            f"Volume: {ck(t.vol_ok)} {t.vol_pct:.0f}% of MA10",
-        ]
-
-    if coin.ath_pts != 0:
-        ath_dist_disp = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (coin.tech.ath_dist_pct if coin.tech else 0.0)
-        pts_str = f"+{coin.ath_pts}" if coin.ath_pts > 0 else str(coin.ath_pts)
-        lines.append(f"📊 ATH distance: -{ath_dist_disp:.0f}% ({pts_str} pts)")
-
-    lines += [
-        "",
-        f"💎 <b>FUNDAMENTAL: {fund_score}/{_FUND_MAX}</b>",
-        "",
-        f"MCap: {_vol_human(coin.market_cap)} | Circ: {coin.circ_supply_pct:.0f}% | FDV/MCap: {coin.fdv_mcap_ratio:.1f}x",
-        "",
-        f"🎯 <b>TOTAL SCORE: {coin.total_score}/100</b>",
-    ]
-    lines += _signal_chain_lines(coin)
-    lines += [
-        "📋 <b>ACTION:</b>",
-        "",
-        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
-        "",
-        f"SL (-{coin.sl_pct:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-        "",
-        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
-        "",
-        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
-        "",
-    ]
-
-    ath_dist = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (coin.tech.ath_dist_pct if coin.tech else 0.0)
-    h4_status = "✅ Bullish" if (coin.tech and coin.tech.h4_ema_ok) else "❌ Bearish"
-    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
-    _ath_l = _fmt_ath_line(coin)
-    if _ath_l:
-        lines.append(_ath_l)
-    lines += [
-        f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}",
-        "",
-        f"R/R: {coin.rr_str}",
-    ]
-
-    w_lines = _build_warning_lines(coin)
-    if w_lines:
-        lines += ["", "⚠️ <b>RISKS:</b>"] + w_lines
-
-    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    lines += ["", f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>']
-
-    return "\n".join(lines)
+    """STRONG ENTRY / WATCH / EARLY SIGNAL alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_momentum_alert(coin) -> bool:
@@ -1389,45 +1511,21 @@ def send_momentum_cooling_alert(coin) -> bool:
     return send_message(build_momentum_cooling_alert(coin))
 
 
+def build_leg_continuation_alert(coin) -> str:
+    """🔄 LEG_CONTINUATION alert — unified 15-line format (Part D)."""
+    return build_unified_alert(coin)
+
+
+def send_leg_continuation_alert(coin) -> bool:
+    """Send a Leg Continuation alert to Telegram."""
+    leg_num = getattr(coin, 'leg_number', 2)
+    log.info(f"Sending LEG {leg_num} CONTINUATION alert for {coin.symbol}…")
+    return send_message(build_leg_continuation_alert(coin))
+
+
 def build_volume_spike_alert(coin) -> str:
-    """
-    Pre-signal alert: current 15m candle volume ≥ 3× avg of prior 3 candles.
-    Fires before a GC or main breakout — early warning, not a confirmed entry.
-    """
-    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    t = coin.tech
-    ratio = f"{t.m15_vol_spike_ratio:.1f}" if t is not None else "?"
-
-    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
-    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
-
-    lines = [
-        f"⚡ <b>VOLUME SPIKE: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        f"Volume <b>{ratio}×</b> normal — move may be starting.",
-        "Watch for entry. Not confirmed yet.",
-    ]
-    lines += _signal_chain_lines(coin)
-    lines += [
-        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_VS_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
-        "",
-    ]
-    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
-    _vs_ath_l = _fmt_ath_line(coin)
-    if _vs_ath_l:
-        lines.append(_vs_ath_l)
-    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
-
-    lines += _build_warning_lines(coin)
-
-    lines += [
-        "",
-        "⚠️ <i>Pre-signal only — wait for GC or breakout confirmation before entry</i>",
-        f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
-    ]
-    return "\n".join(lines)
+    """VOLUME SPIKE alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_volume_spike_alert(coin) -> bool:
@@ -1437,45 +1535,8 @@ def send_volume_spike_alert(coin) -> bool:
 
 
 def build_recovery_alert(coin) -> str:
-    """
-    Recovery Bounce alert: coin pulled back ≥8% from its 24H high
-    and is now rising again with bullish 4H EMA.
-    """
-    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    t = coin.tech
-    prev_peak = _usd(t.h24_high) if t is not None else "?"
-    pullback_pct = ((t.h24_high - coin.entry_price) / t.h24_high * 100) if t is not None and t.h24_high > 0 else 0.0
-
-    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
-    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
-
-    lines = [
-        f"♻️ <b>RECOVERY: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        f"Post-pump bounce — previous 24H peak: <b>{prev_peak}</b>",
-        f"Pulled back <b>{pullback_pct:.1f}%</b> — now recovering.",
-    ]
-    lines += _signal_chain_lines(coin)
-    lines += [
-        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_RB_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_RB_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_RB_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
-        "",
-    ]
-    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
-    _rb_ath_l = _fmt_ath_line(coin)
-    if _rb_ath_l:
-        lines.append(_rb_ath_l)
-    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
-
-    lines += _build_warning_lines(coin)
-
-    lines += [
-        "",
-        "⚠️ <i>Old peak acts as resistance — take partial profits early</i>",
-        f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>',
-    ]
-    return "\n".join(lines)
+    """RECOVERY BOUNCE alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_recovery_alert(coin) -> bool:
@@ -1488,43 +1549,8 @@ def send_recovery_alert(coin) -> bool:
 
 
 def build_golden_cross_alert(coin) -> str:
-    """
-    Early-entry alert for a fresh 15m EMA6/EMA20 golden cross.
-    Lower vol and 1H threshold than main pipeline — signal may be very fresh.
-    """
-    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    t = coin.tech
-
-    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
-    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
-
-    lines = [
-        f"⚡ <b>GOLDEN CROSS: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        "EMA6 just crossed above EMA20 on 15m.",
-        "Very early signal — move just starting.",
-    ]
-    lines += _signal_chain_lines(coin)
-    lines += [
-        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_GC_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
-        "",
-    ]
-    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
-    _gc_ath_l = _fmt_ath_line(coin)
-    if _gc_ath_l:
-        lines.append(_gc_ath_l)
-    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
-
-    lines += _build_warning_lines(coin)
-
-    if t is not None and t.vol_pct < cfg.MOMENTUM_VOL_GC_WARN * 100:
-        lines.append("⚠️ Low volume at cross — confirm with price action before entry")
-
-    lines += ["", "⚠️ <i>Early signal: verify chart before entry</i>",
-              f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>']
-    return "\n".join(lines)
+    """GOLDEN CROSS alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_golden_cross_alert(coin) -> bool:
@@ -1534,34 +1560,8 @@ def send_golden_cross_alert(coin) -> bool:
 
 
 def build_pbw_alert(coin) -> str:
-    """🔍 PRE-BREAKOUT Watch alert — slow-grind accumulation before breakout."""
-    mexc_url  = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    h4_status = "✅ Bullish"   # PBW only fires when 4H EMA stack is bullish
-    score_str = str(coin.total_score) if coin.total_score > 0 else "—"
-
-    lines = [
-        f"🔍 <b>PRE-BREAKOUT: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        f"RSI&lt;45 seit {coin.m1_rsi_streak} Kerzen | EMAs komprimiert ({coin.m1_ema_spread:.3f}%)",
-        f"Erste Volumen-Kerze bestätigt ({coin.m1_vol_ratio:.1f}×).",
-    ]
-    lines += _signal_chain_lines(coin)
-    lines += [
-        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_PBW_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_PBW_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_PBW_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
-        "",
-        f"ATH-Dist: -{coin.ath_dist_pct:.0f}% 📊 | Score: {score_str}/100",
-    ]
-    _pbw_ath_l = _fmt_ath_line(coin)
-    if _pbw_ath_l:
-        lines.append(_pbw_ath_l)
-    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
-
-    lines += _build_warning_lines(coin)
-
-    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
-    return "\n".join(lines)
+    """PRE-BREAKOUT Watch alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_pbw_alert(coin) -> bool:
@@ -1571,40 +1571,8 @@ def send_pbw_alert(coin) -> bool:
 
 
 def build_staircase_alert(coin) -> str:
-    """🪜 STAIRCASE Continuation alert — consolidation pause before leg 2."""
-    mexc_url  = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    t         = coin.tech
-    h4_status = "✅ Bullish" if (t and t.h4_ema_ok) else "❌ Bearish"
-    vol_pct   = f"{t.vol_pct:.0f}%" if t else "?"
-    rsi_val   = f"{t.m15_rsi6:.1f}" if t else "?"
-    kdj_val   = f"{t.m15_kdj_j:.1f}" if t else "?"
-    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
-    score_str = str(coin.total_score) if coin.total_score > 0 else "—"
-
-    lines = [
-        f"🪜 <b>STAIRCASE: {coin.symbol}</b> — Consolidation before Leg 2",
-        f"4H trend intact | 15m Vol: {vol_pct} of MA10",
-        f"RSI cooled: {rsi_val} | KDJ J: {kdj_val}",
-        f"Prior leg: +{coin.sc_prior_move:.1f}% ✅",
-    ]
-    lines += _signal_chain_lines(coin)
-    lines += [
-        f"Entry: <b>{_fmt_price(coin.entry_price)}</b>",
-        f"SL (-{cfg.MOMENTUM_SC_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_SC_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close",
-        f"TP2 (+{cfg.MOMENTUM_SC_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
-        "",
-    ]
-    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {score_str}/100")
-    _sc_ath_l = _fmt_ath_line(coin)
-    if _sc_ath_l:
-        lines.append(_sc_ath_l)
-    lines.append(f"MCap: {_vol_human(coin.market_cap)} | 4H: {h4_status}")
-
-    lines += _build_warning_lines(coin)
-
-    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
-    return "\n".join(lines)
+    """STAIRCASE Continuation alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_staircase_alert(coin) -> bool:
@@ -1614,54 +1582,8 @@ def send_staircase_alert(coin) -> bool:
 
 
 def build_squeeze_alert(coin) -> str:
-    """
-    💥 BB-Squeeze Breakout alert.
-    Fires when a coin breaks out of weeks of EMA compression on extreme 15m volume.
-    """
-    mexc_url   = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    t          = coin.tech
-    vol_ratio  = f"{t.m15_vol_spike_ratio:.1f}" if t else "?"
-    rsi_val    = f"{t.m15_rsi6:.0f}"            if t else "?"
-    compress_d = t.h4_compression_days           if t else 0
-    ath_dist   = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
-
-    lines = [
-        f"💥 <b>SQUEEZE BREAKOUT: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        "Weeks of compression → exploding NOW.",
-        f"Vol <b>{vol_ratio}×</b> normal — move starting.",
-        "⚡ Fast signal — act within 5 minutes.",
-    ]
-
-    if t is not None:
-        kdj_arrow  = "↑" if t.m5_kdj_rising else "↓"
-        m5_kdj_str = f"{t.m5_kdj_j:.0f}{kdj_arrow}" if t.m5_rsi6 > 0 else "n/v"
-        m5_rsi_str = f"{t.m5_rsi6:.0f}"              if t.m5_rsi6 > 0 else "n/v"
-        lines += [
-            "",
-            f"4H:  EMA compressed <b>{compress_d} days</b> | Now breaking out",
-            f"15m: Vol <b>{vol_ratio}×</b> | RSI <b>{rsi_val}</b> | Price &gt; EMA20",
-            f"5m:  KDJ J: <b>{m5_kdj_str}</b> | RSI <b>{m5_rsi_str}</b>",
-        ]
-
-    ep = coin.entry_price
-    lines += [
-        "",
-        f"Entry:  <b>{_fmt_price(ep)}</b>",
-        f"SL (-{cfg.MOMENTUM_SQ_SL_PCT:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_SQ_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → 60% close, SL to entry",
-        f"TP2 (+{cfg.MOMENTUM_SQ_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b> → trailing SL",
-        "",
-    ]
-    lines.append(f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100")
-    _sq_ath_l = _fmt_ath_line(coin)
-    if _sq_ath_l:
-        lines.append(_sq_ath_l)
-    lines.append(f"MCap: {_vol_human(coin.market_cap)} | Compression: {compress_d} days")
-
-    lines += _build_warning_lines(coin, is_squeeze=True)
-
-    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
-    return "\n".join(lines)
+    """BB-Squeeze Breakout alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_squeeze_alert(coin) -> bool:
@@ -1674,29 +1596,8 @@ def send_squeeze_alert(coin) -> bool:
 
 
 def build_speed_alert(coin) -> str:
-    """
-    ⚡ Speed Alert — explosive 15m candle with high volume, bypasses 4H EMA gate.
-    """
-    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-
-    lines = [
-        f"⚡ <b>SPEED ALERT: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        "Explosive 15m candle detected — high-speed move in progress.",
-        "⚡ Act within <b>2 minutes</b> or skip — speed signals decay fast.",
-        "",
-        f"Entry:  <b>{_fmt_price(coin.entry_price)}</b>",
-        f"SL (-{coin.sl_pct:.0f}%):   <b>{_fmt_price(coin.stop_loss)}</b>",
-        f"TP1 (+{cfg.MOMENTUM_SPEED_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b> → exit 70% here",
-        f"TP2 (+{cfg.MOMENTUM_SPEED_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b> → trailing SL",
-        "",
-        f"MCap: {_vol_human(coin.market_cap)}",
-    ]
-    _sp_ath_l = _fmt_ath_line(coin)
-    if _sp_ath_l:
-        lines.append(_sp_ath_l)
-    lines += _build_warning_lines(coin)
-    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
-    return "\n".join(lines)
+    """SPEED ALERT — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_speed_alert(coin) -> bool:
@@ -1706,111 +1607,8 @@ def send_speed_alert(coin) -> bool:
 
 
 def build_early_gc_alert(coin) -> str:
-    """
-    ⚡ Early GC — fresh 5m EMA6/EMA20 golden cross with relaxed 4H gate.
-    Lower confidence than 15m GC. Dual MEXC alert levels (Breakout + Pullback).
-    """
-    mexc_url  = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
-    t         = coin.tech
-    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
-
-    # 4H status line
-    if t is not None and getattr(t, 'h4_transitioning', False):
-        h4_note = "🔄 Transitioning — EMA6 > EMA12 > EMA20 partial, 24H positive"
-    elif t is not None and t.h4_ema_ok:
-        h4_note = f"✅ Bullish | KDJ {t.h4_kdj_j:.0f}"
-    else:
-        h4_note = "❌ Bearish"
-
-    # 15m note
-    if t is not None:
-        m15_ema_str = "✅ bullish" if t.m15_ema6_gt_ema12 and t.m15_ema_ok else "🔄 transitioning"
-        m15_rsi_str = f"{t.m15_rsi6:.0f}" if t.m15_rsi6 > 0 else "n/v"
-        m15_line = f"15m: EMA {m15_ema_str} | RSI {m15_rsi_str}"
-    else:
-        m15_line = "15m: n/v"
-
-    # 5m cross line
-    m5_rsi_str = f"{t.m5_rsi6:.0f}" if t is not None and t.m5_rsi6 > 0 else "?"
-    m5_vol_str = "?"
-    if t is not None and t.m5_ema20 > 0:
-        # vol_ratio stored in MomentumResult doesn't have a field — use warnings or just show m5_rsi
-        pass
-    m5_line = f"5m: EMA cross ✅ | RSI {m5_rsi_str} | Vol ≥1.5× MA10"
-
-    # MEXC alert levels
-    entry   = coin.entry_price
-    sl_fac  = coin.stop_loss / entry if entry > 0 else (1 - coin.sl_pct / 100)
-    tp1_fac = coin.tp1 / entry       if entry > 0 else 1.10
-    tp2_fac = coin.tp2 / entry       if entry > 0 else 1.20
-
-    # Breakout: 24H high × 1.005
-    bk_price = t.h24_high * 1.005 if t is not None and t.h24_high > 0 else 0.0
-    bk_sl    = bk_price * sl_fac
-    bk_tp1   = bk_price * tp1_fac
-    bk_tp2   = bk_price * tp2_fac
-
-    # Pullback: 5m EMA20
-    pb_price = t.m5_ema20 if t is not None and t.m5_ema20 > 0 else 0.0
-    pb_sl    = pb_price * sl_fac
-    pb_tp1   = pb_price * tp1_fac
-    pb_tp2   = pb_price * tp2_fac
-
-    lines = [
-        f"⚡ <b>EARLY GC: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
-        "5m EMA cross detected — move starting.",
-        "Lower confidence than 15m GC signal.",
-        "",
-        f"4H: {h4_note}",
-        m15_line,
-        m5_line,
-        "",
-        "📊 <b>SET MEXC ALERTS:</b>",
-    ]
-
-    if bk_price > 0:
-        lines += [
-            f"🎯 Breakout: <b>{_fmt_price(bk_price)}</b>",
-            "   Last resistance or 15m EMA20 +1%",
-            "   If triggered → enter immediately",
-            "",
-            f"Breakout P&amp;L:",
-            f"  Entry {_fmt_price(bk_price)} | SL {_fmt_price(bk_sl)} | TP1 {_fmt_price(bk_tp1)} | TP2 {_fmt_price(bk_tp2)}",
-        ]
-
-    if pb_price > 0:
-        lines += [
-            "",
-            f"📉 Pullback: <b>{_fmt_price(pb_price)}</b>",
-            "   5m EMA20 level",
-            "   If triggered → check 1m, then enter",
-            "",
-            f"Pullback P&amp;L:",
-            f"  Entry {_fmt_price(pb_price)} | SL {_fmt_price(pb_sl)} | TP1 {_fmt_price(pb_tp1)} | TP2 {_fmt_price(pb_tp2)}",
-        ]
-
-    if bk_price == 0 and pb_price == 0:
-        lines += [
-            f"Entry: <b>{_fmt_price(entry)}</b>",
-            f"SL (-{coin.sl_pct:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
-            f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b>",
-            f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
-        ]
-
-    lines += [
-        "",
-        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
-        f"MCap: {_vol_human(coin.market_cap)}",
-    ]
-    _egc_ath_l = _fmt_ath_line(coin)
-    if _egc_ath_l:
-        lines.append(_egc_ath_l)
-
-    for w in (coin.warnings or []):
-        lines.append(f"⚠️ {w}")
-
-    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
-    return "\n".join(lines)
+    """EARLY GC alert — unified 15-line format."""
+    return build_unified_alert(coin)
 
 
 def send_early_gc_alert(coin) -> bool:

@@ -11,7 +11,9 @@ Scheduled jobs:
   15:30 Europe/Berlin  — US market open reminder
   Every 1H at :05 UTC  — BTC Phase 1 direction detection
   Every 15M :00/:15/:30/:45 UTC  — BTC Phase 2 entry timing
-  Every 15M :02/:17/:32/:47 UTC  — Module 5 momentum scanner
+  Every 15M :02/:17/:32/:47 UTC  — Tier 1: full CMC scan (Module 5)
+  Every 5M  */5 UTC    — Tier 2: active_watch rescan
+  Every 3M  */3 UTC    — Tier 3: leg continuation scan
 
 Stuttgart = Europe/Berlin timezone.
 APScheduler uses this directly, so CET↔CEST transitions are handled automatically.
@@ -262,6 +264,54 @@ def run_momentum_scan():
     log.info(f"Momentum scan: {sent} alert(s) sent.")
 
 
+def run_tier2_scan():
+    """
+    Tier 2 — every 5 minutes.
+    Re-scans active_watch coins (those with 5m EMA momentum from last Tier 1).
+    Sends alerts via the same send_* functions as run_momentum_scan().
+    """
+    log.info("Tier 2 scan: starting…")
+    try:
+        results = m5.scan_tier2()
+    except Exception as exc:
+        log.error(f"Tier 2 scan FAILED: {exc}")
+        return
+
+    if not results:
+        log.debug("Tier 2: no new alerts.")
+        return
+
+    for coin in results:
+        m4.send_momentum_alert(coin)
+        m_log.log_alert(coin, coin.recommendation)
+
+    log.info(f"Tier 2 scan: {len(results)} alert(s) sent.")
+
+
+def run_tier3_scan():
+    """
+    Tier 3 — every 3 minutes.
+    Scans alert_watchlist for leg continuation signals (6% pullback + fresh EMA cross).
+    Sends LEG_CONTINUATION alerts via m4.send_leg_continuation_alert().
+    """
+    log.info("Tier 3 scan: starting…")
+    try:
+        results = m5.scan_tier3()
+    except Exception as exc:
+        log.error(f"Tier 3 scan FAILED: {exc}")
+        return
+
+    if not results:
+        log.debug("Tier 3: no leg continuations detected.")
+        return
+
+    for coin in results:
+        m4.send_leg_continuation_alert(coin)
+        m_log.log_alert(coin, coin.recommendation)
+
+    log.info(f"Tier 3 scan: {len(results)} leg continuation(s) sent.")
+
+
 def run_m5_daily_summary():
     """
     Module 5 daily summary — runs at 08:01 Stuttgart, right after the briefing.
@@ -499,13 +549,33 @@ def start_scheduler():
         replace_existing = True,
     )
 
+    # ── Job 8: Tier 2 — re-scan active_watch every 5 minutes ─────────────────
+    scheduler.add_job(
+        func             = run_tier2_scan,
+        trigger          = CronTrigger(minute="*/5", timezone="UTC"),
+        id               = "momentum_tier2_5m",
+        name             = "5M Tier 2 — Active Watch Rescan",
+        replace_existing = True,
+    )
+
+    # ── Job 9: Tier 3 — leg continuation every 3 minutes ─────────────────────
+    scheduler.add_job(
+        func             = run_tier3_scan,
+        trigger          = CronTrigger(minute="*/3", timezone="UTC"),
+        id               = "momentum_tier3_3m",
+        name             = "3M Tier 3 — Leg Continuation Scan",
+        replace_existing = True,
+    )
+
     log.info("Scheduler started:")
     log.info(f"  • Daily briefing     — 08:00 Stuttgart (Europe/Berlin)")
     log.info(f"  • M5 daily summary   — 08:01 Stuttgart (Europe/Berlin)")
     log.info(f"  • US market reminder — 15:30 Stuttgart (Europe/Berlin)")
     log.info(f"  • BTC Phase 1        — every 1H at :05 UTC  (direction detection)")
     log.info(f"  • BTC Phase 2        — every 15M at :00/:15/:30/:45 UTC  (entry timing)")
-    log.info(f"  • Momentum Scanner   — every 15M at :02/:17/:32/:47 UTC  (Module 5)")
+    log.info(f"  • Momentum Scanner   — every 15M at :02/:17/:32/:47 UTC  (Tier 1)")
+    log.info(f"  • Tier 2             — every 5M  (active watch rescan)")
+    log.info(f"  • Tier 3             — every 3M  (leg continuation)")
     log.info(f"  • Weekly Hit-Rate    — every Sunday 09:00 Berlin")
     log.info("Press Ctrl+C to stop.")
 

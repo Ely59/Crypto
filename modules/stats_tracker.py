@@ -280,6 +280,27 @@ class StatsTracker:
             else:
                 lines += ["", "Last scan: no qualifying coins."]
 
+            # Tiered scan status (MASTER PROMPT Part A)
+            try:
+                from modules.momentum_scanner import get_tier_status
+                ts = get_tier_status()
+
+                def _ago(secs: int) -> str:
+                    if secs < 0:
+                        return "not yet"
+                    if secs < 60:
+                        return f"{secs}s ago"
+                    return f"{secs // 60}m ago"
+
+                lines += [
+                    "",
+                    f"🔄 Tier1 (15m): last run {_ago(ts['tier1_ago'])}",
+                    f"   Tier2 (5m):  {ts['tier2_coins']} coins active  |  last {_ago(ts['tier2_ago'])}",
+                    f"   Tier3 (3m):  {ts['tier3_coins']} on watchlist  |  last {_ago(ts['tier3_ago'])}",
+                ]
+            except Exception:
+                pass
+
             # Global 4H cooldown display (CHANGE 5C)
             try:
                 from modules.momentum_scanner import get_global_cooldown_status

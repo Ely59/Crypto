@@ -234,6 +234,9 @@ class TechResult:
     # 4H Transition Mode: EMA6 > EMA20 + EMA6 > EMA12 + 24H positive — partial bullish
     h4_transitioning:     bool  = False
 
+    # 4H Momentum Method B: price > 8H ago + DIF rising + RSI > 42 + green candle
+    h4_method_b:          bool  = False
+
 
 @dataclass
 class FundResult:
@@ -490,6 +493,17 @@ def _mark_early_gc_alerted(symbol: str) -> None:
         del _early_gc_alerted[k]
 
 
+# ── Tiered scan state — MASTER PROMPT Part A ─────────────────────────────────
+# Tier 2: coins with active 5m momentum (populated during Tier 1 scan)
+_active_watch: set[str] = set()           # mexc_symbols with 5m EMA cross / spike
+# Tier 3: coins that received an alert (for leg continuation tracking)
+_alert_watchlist: dict[str, dict] = {}    # symbol → {leg_high, entry_price, signal_type, leg_number, alert_time}
+
+# Timestamps for /status reporting
+_tier1_last_run: float = 0.0
+_tier2_last_run: float = 0.0
+_tier3_last_run: float = 0.0
+
 # ── Global per-coin cooldown — CHANGE 5A ─────────────────────────────────────
 # Stores: symbol → (timestamp, rec_type, price_at_alert)
 _global_alerted: dict[str, tuple] = {}
@@ -517,6 +531,28 @@ def _mark_global_alerted(symbol: str, rec_type: str, price: float) -> None:
     stale = time.time() - 86_400
     for k in [k for k, (ts, _r, _p) in list(_global_alerted.items()) if ts < stale]:
         del _global_alerted[k]
+
+
+def _add_to_watchlist(symbol: str, price: float, signal_type: str, leg_number: int = 1) -> None:
+    """Add or update a coin in the alert_watchlist after an alert fires."""
+    global _alert_watchlist
+    existing = _alert_watchlist.get(symbol)
+    if existing and existing.get("leg_number", 1) >= leg_number:
+        # Only update if this is a new leg or same leg with higher price
+        if price > existing.get("leg_high", 0):
+            existing["leg_high"] = price
+        return
+    _alert_watchlist[symbol] = {
+        "leg_high":    price,
+        "entry_price": price,
+        "signal_type": signal_type,
+        "leg_number":  leg_number,
+        "alert_time":  time.time(),
+    }
+    # Expire entries older than 72H
+    stale = time.time() - 72 * 3600
+    for k in [k for k, v in list(_alert_watchlist.items()) if v.get("alert_time", 0) < stale]:
+        del _alert_watchlist[k]
 
 
 def get_global_cooldown_status() -> list:
@@ -626,6 +662,21 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     h4_rsi6    = float(compute_rsi(close_4h, period=6).iloc[-1])
     h4_dif, h4_dea, _ = compute_macd(close_4h)
     h4_macd_ok = float(h4_dif.iloc[-1]) > float(h4_dea.iloc[-1])
+
+    # Method B: 4H momentum check (alternative to full EMA stack)
+    h4_method_b = False
+    if len(df_4h) >= 3:
+        _c0      = float(close_4h.iloc[-1])
+        _c2      = float(close_4h.iloc[-3])
+        _o0      = float(df_4h["open"].iloc[-1])
+        _dif_now = float(h4_dif.iloc[-1])
+        _dif_prv = float(h4_dif.iloc[-2]) if len(h4_dif) >= 2 else _dif_now
+        h4_method_b = (
+            _c0 > _c2 and        # price higher than 8H ago
+            _dif_now > _dif_prv and   # MACD DIF rising
+            h4_rsi6 > 42 and     # RSI above oversold
+            _c0 > _o0            # green current candle
+        )
 
     _, _, j4h = compute_kdj(df_4h)
     h4_kdj_j  = float(j4h.iloc[-1])
@@ -739,6 +790,7 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         h4_ema20_slope=round(h4_ema20_slope, 3),
         m15_price_gt_h4_ema20=m15_price_gt_h4_ema20,
         h4_compression_days=h4_compression_days,
+        h4_method_b=h4_method_b,
     )
 
 
@@ -909,6 +961,24 @@ def _check_5m(mexc_symbol: str) -> "dict | None":
     vol_prior9     = float(vol_s.iloc[-10:-1].mean()) if len(vol_s) >= 10 else vol_last
     vol_recent_pct = (vol_prior9 / vol_ma10 * 100.0) if vol_ma10 > 0 else 100.0
 
+    # 2-candle wick filter (PART C): confirm cross on the NEXT candle, not the cross candle itself
+    m5_low          = float(df_5m["low"].iloc[-1])
+    candle_gain_pct = ((m5_price - m5_open_last) / m5_open_last * 100.0) if m5_open_last > 0 else 0.0
+    is_spike        = m5_vol_pct >= 500.0 or candle_gain_pct >= 5.0  # VS / Speed exception
+
+    # Cross happened at candle[-2] (was below at [-3], above at [-2]) → current[-1] is confirmation
+    cross_was_prev_candle = (
+        len(ema6_s) >= 3 and
+        float(ema6_s.iloc[-3]) < float(ema20_s.iloc[-3]) and
+        float(ema6_s.iloc[-2]) > float(ema20_s.iloc[-2])
+    )
+    candle_confirmed = (
+        cross_was_prev_candle and
+        m5_price > m5_ema20 and         # close above EMA20
+        m5_low > m5_ema20 * 0.998 and   # low didn't wick below EMA20
+        vol_last > vol_ma10 * 0.8       # vol at least 80% of MA10
+    )
+
     return {
         "rsi6":               round(m5_rsi6, 2),
         "kdj_j":              round(m5_kdj_j, 2),
@@ -921,6 +991,8 @@ def _check_5m(mexc_symbol: str) -> "dict | None":
         "vol_pct":            round(m5_vol_pct, 1),
         "vol_recent_pct":     round(vol_recent_pct, 1),
         "ema20":              m5_ema20,   # raw float for entry zone
+        "candle_confirmed":   candle_confirmed,
+        "is_spike":           is_spike,
     }
 
 
@@ -940,12 +1012,19 @@ def _base_5m_gate_ok(m5: "dict | None") -> bool:
     """
     Unified 5m primary gate — replaces per-signal 1H gates.
     Passes if: (EMA6 > EMA20 OR fresh cross) AND RSI 25-75 AND vol >= 1.2× MA10.
+    Fresh crosses additionally require 2-candle wick confirmation (PART C),
+    unless the signal is a spike (vol ≥5× or candle gain ≥5%).
     """
     if m5 is None:
         return False
     ema_ok = m5["ema6_gt_ema20"] or m5["fresh_cross"]
     rsi_ok = cfg.MOMENTUM_5M_GATE_RSI_MIN <= m5["rsi6"] <= cfg.MOMENTUM_5M_GATE_RSI_MAX
     vol_ok = m5["vol_pct"] >= cfg.MOMENTUM_5M_GATE_VOL_MIN * 100
+
+    # 2-candle wick filter: fresh crosses must be confirmed on the NEXT candle
+    if m5.get("fresh_cross") and not (m5.get("candle_confirmed", False) or m5.get("is_spike", False)):
+        return False
+
     return ema_ok and rsi_ok and vol_ok
 
 
@@ -976,7 +1055,7 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
         tech.m5_note = "5m price below EMA20 — wait for entry zone"
     else:
         tech.m5_ok   = True
-        tech.m5_note = ""
+        tech.m5_note = "✅ 2-candle confirmed — not a wick" if m5.get("candle_confirmed") else ""
 
 
 def _ath_score(dist_pct: float) -> int:
@@ -1333,6 +1412,18 @@ def scan() -> list[MomentumResult]:
             _m5_cache[_msym] = _check_5m(_msym)
     log.info(f"5m pre-fetch: {len(_m5_cache)} symbols, {sum(1 for v in _m5_cache.values() if v is not None)} with data.")
 
+    # Populate active_watch with coins showing 5m momentum (for Tier 2 rescans)
+    global _active_watch, _tier1_last_run
+    _active_watch = {
+        cand[3] for cand in candidates
+        if _m5_cache.get(cand[3]) and (
+            _m5_cache[cand[3]].get("ema6_gt_ema20") or
+            _m5_cache[cand[3]].get("fresh_cross")
+        )
+    }
+    _tier1_last_run = time.time()
+    log.info(f"Tier 1: {len(_active_watch)} symbols added to active_watch.")
+
     # ── Stages 2 + 3: TA gate + full scoring ─────────────────────────────────
     scored:              list[MomentumResult] = []
     cooling_alerts:      list[MomentumResult] = []
@@ -1421,6 +1512,15 @@ def scan() -> list[MomentumResult]:
                               if fear_sep_ok else f"RS vs BTC {rs_vs_btc:+.1f}%")
                     log.info(f"  😟 FEAR bypass  {symbol}: {reason}")
 
+            # Method B: 4H momentum bypass (price>8H + DIF rising + RSI>42 + green candle)
+            if not tech.macro_ok and tech.h4_method_b:
+                tech.macro_ok = True
+                log.info(
+                    f"  📈 4H-METHOD-B  {symbol}: "
+                    f"price>{float(close_4h.iloc[-3]) if len(close_4h)>=3 else '?':.4g} (8H ago), "
+                    f"DIF↑, RSI {tech.h4_rsi6:.0f}>42, green candle"
+                )
+
             # 4H Transition Mode: EMA6 above both EMA12 and EMA20 + 24H positive
             if not tech.macro_ok and h4_ema6_gt20 and tech.h4_ema6 > tech.h4_ema12 and change_24h > 0:
                 tech.macro_ok = True
@@ -1494,6 +1594,10 @@ def scan() -> list[MomentumResult]:
         # 4H Transition Mode penalty: -5 pts for incomplete EMA stack
         if tech.h4_transitioning:
             total = max(0, total - 5)
+
+        # Method B penalty: -3 pts (alternative 4H gate, less confirmation than full EMA stack)
+        if tech.h4_method_b and not tech.h4_ema_ok and not tech.h4_transitioning:
+            total = max(0, total - 3)
 
         # Recommendation classification
         if total >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:
@@ -2485,6 +2589,12 @@ def scan() -> list[MomentumResult]:
     speed_alerts    = [r for r in speed_alerts    if id(r) in _keep_ids]
     early_gc_alerts = [r for r in early_gc_alerts if id(r) in _keep_ids]
 
+    # Populate alert_watchlist after dedup (Tier 3 leg tracking, Part D)
+    _all_deduped = (new_alerts + gc_alerts + vs_alerts + rb_alerts +
+                    pbw_alerts + sc_alerts + sq_alerts + speed_alerts + early_gc_alerts)
+    for _r in _all_deduped:
+        _add_to_watchlist(_r.symbol, _r.price, _r.recommendation)
+
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
     early   = sum(r.recommendation == "EARLY SIGNAL" for r in new_alerts)
@@ -2507,6 +2617,260 @@ def scan() -> list[MomentumResult]:
     )
     return (new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts +
             pbw_alerts + sc_alerts + sq_alerts + speed_alerts + early_gc_alerts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Tier 2: 5-min rescan of active_watch coins
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scan_tier2() -> list:
+    """
+    Tier 2 scan — every 5 minutes.
+    Re-scans coins in _active_watch (those showing 5m EMA cross / spike in last Tier 1).
+    Skips full Stage 1 CMC fetch. Applies Stage 2 momentum checks only.
+    Returns new alerts (same MomentumResult type as scan()).
+    """
+    global _tier2_last_run
+    _tier2_last_run = time.time()
+
+    if not _active_watch:
+        log.debug("Tier 2: active_watch empty — skipping.")
+        return []
+
+    log.info(f"Tier 2 scan: {len(_active_watch)} coins in active_watch.")
+    _refresh_market_context()
+    _ath_map    = get_coingecko_ath_map(limit=500)
+    futures_set = get_mexc_futures_symbols()
+    if not futures_set:
+        log.error("Tier 2 aborted — MEXC futures list unavailable.")
+        return []
+
+    results: list = []
+    alerted_syms  = set(_global_alerted.keys())
+
+    for mexc_symbol in list(_active_watch):
+        symbol = mexc_symbol.replace("_USDT", "")
+        if _on_global_cooldown(symbol, "TIER2", 0.0):
+            continue
+        if mexc_symbol not in futures_set:
+            continue
+
+        m5 = _check_5m(mexc_symbol)
+        if not _base_5m_gate_ok(m5):
+            continue
+
+        tech = _check_technicals(mexc_symbol)
+        if tech is None:
+            continue
+
+        price = tech.m15_price
+        if price <= 0:
+            continue
+
+        _apply_5m_to_tech(tech, m5)
+
+        # 4H gate: Method A, B, or C
+        h4_trans_ok = tech.h4_ema6 > tech.h4_ema12 and tech.h4_ema6 > tech.h4_ema20
+        if not (tech.h4_ema_ok or tech.h4_method_b or h4_trans_ok):
+            continue
+
+        # Simple scoring for Tier 2 (no fundamental data available without CMC)
+        tier2_score = tech.score + (5 if tech.h4_ema_ok else 0) + (3 if tech.h4_method_b else 0)
+
+        if tier2_score < 40:
+            continue
+
+        # Emit a WATCH result if score is meaningful
+        rec     = "WATCH" if tier2_score >= 55 else "EARLY SIGNAL"
+        rec_em  = "🟡" if rec == "WATCH" else "🔍"
+        decimals = _price_decimals(price)
+        _ath_dist, _ath_px, _ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
+
+        log.info(f"  Tier2 ✓  {symbol}  score {tier2_score}  → {rec}")
+        _mark_alerted(symbol)
+        _mark_global_alerted(symbol, rec, price)
+        _add_to_watchlist(symbol, price, rec)
+
+        results.append(MomentumResult(
+            symbol=symbol, name=symbol, price=round(price, 8),
+            change_1h=0.0, change_24h=0.0,
+            market_cap=0.0, volume_24h=0.0, fdv=0.0,
+            fdv_mcap_ratio=0.0, circ_supply_pct=0.0,
+            mexc_symbol=mexc_symbol,
+            tech=tech, total_score=tier2_score,
+            recommendation=rec, rec_emoji=rec_em,
+            warnings=["Tier 2 rescan — verify chart before entry"],
+            entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), decimals),
+            stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SL_PCT / 100), decimals),
+            tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), decimals),
+            tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), decimals),
+            sl_pct=cfg.MOMENTUM_SL_PCT,
+            ath_dist_pct=_ath_dist, ath_price=_ath_px, ath_date=_ath_date,
+        ))
+
+    log.info(f"Tier 2 done — {len(results)} alert(s).")
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Tier 3: 3-min leg continuation scan of alert_watchlist
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class LegContinuationResult:
+    """Returned by scan_tier3() when a leg continuation is detected."""
+    symbol:      str
+    mexc_symbol: str
+    leg_number:  int
+    price:       float
+    leg_high:    float
+    pullback_pct: float
+    signal_type: str    # original signal type
+    matched_tags: list  = field(default_factory=list)
+
+
+def scan_tier3() -> list[MomentumResult]:
+    """
+    Tier 3 scan — every 3 minutes.
+    Scans _alert_watchlist coins for leg continuation signals.
+    Returns MomentumResult objects with recommendation="LEG_CONTINUATION".
+    """
+    global _tier3_last_run, _alert_watchlist
+    _tier3_last_run = time.time()
+
+    if not _alert_watchlist:
+        log.debug("Tier 3: alert_watchlist empty — skipping.")
+        return []
+
+    log.info(f"Tier 3 scan: {len(_alert_watchlist)} coins on watchlist.")
+    _ath_map    = get_coingecko_ath_map(limit=500)
+    futures_set = get_mexc_futures_symbols()
+    if not futures_set:
+        return []
+
+    results: list[MomentumResult] = []
+    to_expire: list[str] = []
+
+    for symbol, wl_entry in list(_alert_watchlist.items()):
+        mexc_symbol  = f"{symbol}_USDT"
+        leg_high     = wl_entry.get("leg_high",    0.0)
+        entry_price  = wl_entry.get("entry_price", 0.0)
+        leg_number   = wl_entry.get("leg_number",  1)
+        alert_time   = wl_entry.get("alert_time",  0.0)
+        signal_type  = wl_entry.get("signal_type", "")
+
+        if mexc_symbol not in futures_set:
+            continue
+        if _on_global_cooldown(symbol, "LEG_CONTINUATION", 0.0):
+            continue
+        if time.time() - alert_time > 72 * 3600:
+            to_expire.append(symbol)
+            continue
+
+        m5 = _check_5m(mexc_symbol)
+        if not _base_5m_gate_ok(m5):
+            continue
+
+        if m5 is None:
+            continue
+
+        price = float(m5.get("ema20", 0.0)) or 0.0
+        tech  = _check_technicals(mexc_symbol)
+        if tech is None:
+            continue
+        price = tech.m15_price
+        if price <= 0:
+            continue
+
+        # Leg detection criteria
+        if leg_high <= 0:
+            leg_high = price
+
+        pullback_pct = (leg_high - price) / leg_high * 100 if leg_high > 0 else 0.0
+
+        # (1) Price pulled back ≥6% from leg_high
+        if pullback_pct < 6.0:
+            # Update leg_high if price has moved up
+            if price > leg_high:
+                wl_entry["leg_high"] = price
+                leg_high = price
+            continue
+
+        # (2) Fresh 5m EMA cross
+        if not m5.get("fresh_cross", False):
+            continue
+
+        # (3) 5m vol ≥1.5× MA10
+        if m5.get("vol_pct", 0.0) < 150.0:
+            continue
+
+        # (4) Price ≥2% above recent low (tech.h24_low)
+        if tech.h24_low > 0 and price < tech.h24_low * 1.02:
+            continue
+
+        # (5) 2-candle wick confirmation (close > EMA20, low near EMA20, vol ok)
+        m5_ema20 = m5.get("ema20", 0.0)
+        if m5_ema20 > 0:
+            # Already checked by _base_5m_gate_ok but verify close above EMA20
+            if not m5.get("price_above_ema20", False):
+                continue
+
+        # (6) Global 4H cooldown not active — already checked above
+        _apply_5m_to_tech(tech, m5)
+
+        new_leg = leg_number + 1
+        log.info(
+            f"  🔄 LEG {new_leg}  {symbol}  pullback {pullback_pct:.1f}%  "
+            f"price {price:.4g}  leg_high {leg_high:.4g}"
+        )
+
+        decimals = _price_decimals(price)
+        _ath_dist, _ath_px, _ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
+
+        _mark_alerted(symbol)
+        _mark_global_alerted(symbol, "LEG_CONTINUATION", price)
+        wl_entry["leg_number"] = new_leg
+        wl_entry["leg_high"]   = price
+        wl_entry["alert_time"] = time.time()
+
+        result = MomentumResult(
+            symbol=symbol, name=symbol, price=round(price, 8),
+            change_1h=0.0, change_24h=0.0,
+            market_cap=0.0, volume_24h=0.0, fdv=0.0,
+            fdv_mcap_ratio=0.0, circ_supply_pct=0.0,
+            mexc_symbol=mexc_symbol,
+            tech=tech, total_score=tech.score,
+            recommendation="LEG_CONTINUATION", rec_emoji="🔄",
+            warnings=[f"Leg {new_leg} — confirm 1m chart before entry"],
+            entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), decimals),
+            stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SL_PCT / 100), decimals),
+            tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), decimals),
+            tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), decimals),
+            sl_pct=cfg.MOMENTUM_SL_PCT,
+            ath_dist_pct=_ath_dist, ath_price=_ath_px, ath_date=_ath_date,
+        )
+        # Attach leg metadata for the alert builder
+        result.__dict__["leg_number"] = new_leg
+        result.__dict__["leg_high"]   = round(leg_high, 8)
+        results.append(result)
+
+    for sym in to_expire:
+        del _alert_watchlist[sym]
+
+    log.info(f"Tier 3 done — {len(results)} leg continuation(s).")
+    return results
+
+
+def get_tier_status() -> dict:
+    """Return tier status info for /status command display."""
+    now = time.time()
+    return {
+        "tier1_ago":   int(now - _tier1_last_run)   if _tier1_last_run > 0 else -1,
+        "tier2_coins": len(_active_watch),
+        "tier2_ago":   int(now - _tier2_last_run)   if _tier2_last_run > 0 else -1,
+        "tier3_coins": len(_alert_watchlist),
+        "tier3_ago":   int(now - _tier3_last_run)   if _tier3_last_run > 0 else -1,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
