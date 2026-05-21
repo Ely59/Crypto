@@ -47,6 +47,7 @@ class DailyStats:
     sc_alerts:      int        = 0   # STAIRCASE Continuation alerts sent
     sq_alerts:      int        = 0   # SQUEEZE BREAKOUT alerts sent
     speed_alerts:   int        = 0   # SPEED ALERT track alerts sent
+    early_gc_alerts: int       = 0   # EARLY GC (5m cross) alerts sent
     best_coin:      str        = ""
     best_score:     int        = 0
     last_scan_ts:   str        = ""  # HH:MM Berlin time of most recent scan
@@ -145,8 +146,10 @@ class StatsTracker:
                     s.sq_alerts += 1
                 elif rec == "SPEED ALERT":
                     s.speed_alerts += 1
+                elif rec == "EARLY GC":
+                    s.early_gc_alerts += 1
 
-                _no_score = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "SPEED ALERT"}
+                _no_score = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "SPEED ALERT", "EARLY GC"}
 
                 # Track best total score (signal-only types have no score)
                 if rec not in _no_score and r.total_score > s.best_score:
@@ -191,7 +194,7 @@ class StatsTracker:
             self._scan_history.append(snap)
 
             # Today's top scored coins for /top and /best commands
-            _no_score_recs = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY"}
+            _no_score_recs = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "EARLY GC"}
             for r in results:
                 if r.recommendation not in _no_score_recs:
                     s.top_results.append(r)
@@ -244,7 +247,8 @@ class StatsTracker:
 
             total_alerts = (s.entry_alerts + s.watch_alerts + s.early_alerts +
                             s.gc_alerts + s.vs_alerts + s.rb_alerts +
-                            s.pbw_alerts + s.sc_alerts + s.sq_alerts + s.speed_alerts)
+                            s.pbw_alerts + s.sc_alerts + s.sq_alerts + s.speed_alerts +
+                            s.early_gc_alerts)
             lines = []
             if s.fear_mode_active:
                 lines.append(f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — Stage 2a relaxed to 0.05% sep")
@@ -259,7 +263,7 @@ class StatsTracker:
                 f"Alerts sent: <b>{total_alerts}</b>  "
                 f"(Entry: {s.entry_alerts} | Watch: {s.watch_alerts} | Early: {s.early_alerts} "
                 f"| GC: {s.gc_alerts} | VS: {s.vs_alerts} | RB: {s.rb_alerts} "
-                f"| PBW: {s.pbw_alerts} | SC: {s.sc_alerts} | SQ: {s.sq_alerts} | ⚡: {s.speed_alerts} | Cooling: {s.cooling_alerts})",
+                f"| PBW: {s.pbw_alerts} | SC: {s.sc_alerts} | SQ: {s.sq_alerts} | ⚡: {s.speed_alerts} | EGC: {s.early_gc_alerts} | Cooling: {s.cooling_alerts})",
             ]
 
             if s.top_coins:

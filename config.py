@@ -349,6 +349,17 @@ MOMENTUM_SPEED_SL_PCT         = 4.0   # Speed Alert stop-loss
 MOMENTUM_SPEED_TP1_PCT        = 5.0   # Speed Alert TP1
 MOMENTUM_SPEED_TP2_PCT        = 10.0  # Speed Alert TP2
 
+# ─── Early GC (5m EMA cross signal) — Stage 2i ────────────────────────────────
+MOMENTUM_EARLY_GC_1H_MIN     = 0.5    # minimum 1H gain for Early GC candidates
+MOMENTUM_EARLY_GC_1H_MAX     = 12.0   # maximum 1H gain
+MOMENTUM_EARLY_GC_MCAP_MIN   = 10_000_000  # $10M minimum MCap
+MOMENTUM_EARLY_GC_RSI_MIN    = 30.0   # 5m RSI lower bound (not oversold)
+MOMENTUM_EARLY_GC_RSI_MAX    = 72.0   # 5m RSI upper bound (not overbought)
+MOMENTUM_EARLY_GC_VOL_MIN    = 1.5    # 5m vol ≥ 1.5× MA10 required
+MOMENTUM_EARLY_GC_MIN_SCORE  = 60     # minimum score to fire alert
+MOMENTUM_EARLY_GC_SL_PCT     = 5.0    # SL% for Early GC (tighter than main)
+MOMENTUM_EARLY_GC_COOLDOWN_H = 4.0    # hours between Early GC alerts per coin
+
 # ─── BB-Squeeze Bypass — Gate 2g (CHANGE 2B) ─────────────────────────────────
 MOMENTUM_SQUEEZE_EMA_SPREAD_MAX = 3.0  # abs spread between 4H EMA6 and EMA20 < 3% (compressed)
 MOMENTUM_SQUEEZE_EMA_SLOPE_MAX  = 0.5  # 4H EMA20 slope over 5 candles < 0.5% (flat)

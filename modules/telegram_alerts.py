@@ -197,7 +197,9 @@ def _signal_chain_lines(coin) -> list[str]:
     h4_rsi_ok  = t.h4_rsi6 <= 0 or t.h4_rsi6 < 80   # rsi6=0 → not computed, treat as ok
     h4_ok      = t.h4_ema_ok and h4_rsi_ok
     h4_line = f"4H:  {ck(h4_ok)} EMA bullish | {h4_rsi_str} | MACD {macd_arrow}"
-    if not t.h4_ema_ok:
+    if not t.h4_ema_ok and getattr(t, 'h4_transitioning', False):
+        h4_line = f"4H:  🔄 EMA transitioning | {h4_rsi_str} | 24H positive"
+    elif not t.h4_ema_ok:
         h4_line = f"4H:  ❌ EMA bearish [{t.h4_ema6:.4g}/{t.h4_ema12:.4g}/{t.h4_ema20:.4g}]"
     elif not h4_rsi_ok:
         h4_line = f"4H:  ❌ EMA bullish | {h4_rsi_str} overheated | MACD {macd_arrow}"
@@ -1694,6 +1696,120 @@ def send_speed_alert(coin) -> bool:
     return send_message(build_speed_alert(coin))
 
 
+def build_early_gc_alert(coin) -> str:
+    """
+    ⚡ Early GC — fresh 5m EMA6/EMA20 golden cross with relaxed 4H gate.
+    Lower confidence than 15m GC. Dual MEXC alert levels (Breakout + Pullback).
+    """
+    mexc_url  = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    t         = coin.tech
+    ath_dist  = coin.ath_dist_pct if coin.ath_dist_pct > 0 else (t.ath_dist_pct if t else 0.0)
+
+    # 4H status line
+    if t is not None and getattr(t, 'h4_transitioning', False):
+        h4_note = "🔄 Transitioning — EMA6 > EMA12 > EMA20 partial, 24H positive"
+    elif t is not None and t.h4_ema_ok:
+        h4_note = f"✅ Bullish | KDJ {t.h4_kdj_j:.0f}"
+    else:
+        h4_note = "❌ Bearish"
+
+    # 15m note
+    if t is not None:
+        m15_ema_str = "✅ bullish" if t.m15_ema6_gt_ema12 and t.m15_ema_ok else "🔄 transitioning"
+        m15_rsi_str = f"{t.m15_rsi6:.0f}" if t.m15_rsi6 > 0 else "n/v"
+        m15_line = f"15m: EMA {m15_ema_str} | RSI {m15_rsi_str}"
+    else:
+        m15_line = "15m: n/v"
+
+    # 5m cross line
+    m5_rsi_str = f"{t.m5_rsi6:.0f}" if t is not None and t.m5_rsi6 > 0 else "?"
+    m5_vol_str = "?"
+    if t is not None and t.m5_ema20 > 0:
+        # vol_ratio stored in MomentumResult doesn't have a field — use warnings or just show m5_rsi
+        pass
+    m5_line = f"5m: EMA cross ✅ | RSI {m5_rsi_str} | Vol ≥1.5× MA10"
+
+    # MEXC alert levels
+    entry   = coin.entry_price
+    sl_fac  = coin.stop_loss / entry if entry > 0 else (1 - coin.sl_pct / 100)
+    tp1_fac = coin.tp1 / entry       if entry > 0 else 1.10
+    tp2_fac = coin.tp2 / entry       if entry > 0 else 1.20
+
+    # Breakout: 24H high × 1.005
+    bk_price = t.h24_high * 1.005 if t is not None and t.h24_high > 0 else 0.0
+    bk_sl    = bk_price * sl_fac
+    bk_tp1   = bk_price * tp1_fac
+    bk_tp2   = bk_price * tp2_fac
+
+    # Pullback: 5m EMA20
+    pb_price = t.m5_ema20 if t is not None and t.m5_ema20 > 0 else 0.0
+    pb_sl    = pb_price * sl_fac
+    pb_tp1   = pb_price * tp1_fac
+    pb_tp2   = pb_price * tp2_fac
+
+    lines = [
+        f"⚡ <b>EARLY GC: {coin.symbol}</b> {coin.change_1h:+.2f}% (1H)",
+        "5m EMA cross detected — move starting.",
+        "Lower confidence than 15m GC signal.",
+        "",
+        f"4H: {h4_note}",
+        m15_line,
+        m5_line,
+        "",
+        "📊 <b>SET MEXC ALERTS:</b>",
+    ]
+
+    if bk_price > 0:
+        lines += [
+            f"🎯 Breakout: <b>{_fmt_price(bk_price)}</b>",
+            "   Last resistance or 15m EMA20 +1%",
+            "   If triggered → enter immediately",
+            "",
+            f"Breakout P&amp;L:",
+            f"  Entry {_fmt_price(bk_price)} | SL {_fmt_price(bk_sl)} | TP1 {_fmt_price(bk_tp1)} | TP2 {_fmt_price(bk_tp2)}",
+        ]
+
+    if pb_price > 0:
+        lines += [
+            "",
+            f"📉 Pullback: <b>{_fmt_price(pb_price)}</b>",
+            "   5m EMA20 level",
+            "   If triggered → check 1m, then enter",
+            "",
+            f"Pullback P&amp;L:",
+            f"  Entry {_fmt_price(pb_price)} | SL {_fmt_price(pb_sl)} | TP1 {_fmt_price(pb_tp1)} | TP2 {_fmt_price(pb_tp2)}",
+        ]
+
+    if bk_price == 0 and pb_price == 0:
+        lines += [
+            f"Entry: <b>{_fmt_price(entry)}</b>",
+            f"SL (-{coin.sl_pct:.0f}%): <b>{_fmt_price(coin.stop_loss)}</b>",
+            f"TP1 (+{cfg.MOMENTUM_TP1_PCT:.0f}%): <b>{_fmt_price(coin.tp1)}</b>",
+            f"TP2 (+{cfg.MOMENTUM_TP2_PCT:.0f}%): <b>{_fmt_price(coin.tp2)}</b>",
+        ]
+
+    lines += [
+        "",
+        f"ATH-Dist: -{ath_dist:.0f}% 📊 | Score: {coin.total_score}/100",
+        f"MCap: {_vol_human(coin.market_cap)}",
+    ]
+    _egc_ath_l = _fmt_ath_line(coin)
+    if _egc_ath_l:
+        lines.append(_egc_ath_l)
+
+    for w in (coin.warnings or []):
+        lines.append(f"⚠️ {w}")
+
+    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol} on MEXC Futures</a>')
+    return "\n".join(lines)
+
+
+def send_early_gc_alert(coin) -> bool:
+    """Send an Early GC (5m EMA cross) alert to Telegram."""
+    log.info(f"Sending EARLY GC alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h, score {coin.total_score})…")
+    return send_message(build_early_gc_alert(coin))
+
+
 def build_weekly_hitrate_report(stats: dict) -> str:
     """
     Weekly hit-rate report — sent every Sunday 09:00 Berlin.
@@ -1717,6 +1833,7 @@ def build_weekly_hitrate_report(stats: dict) -> str:
         "EARLY SIGNAL":  "🔍 Early Signal",
         "SQUEEZE":       "💥 BB-Squeeze",
         "SPEED ALERT":   "⚡ Speed Alert",
+        "EARLY GC":      "⚡ Early GC",
     }
 
     lines = [

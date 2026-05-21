@@ -228,6 +228,9 @@ class TechResult:
     m15_price_gt_h4_ema20: bool = False  # 15m price > 4H EMA20 (breakout confirmation)
     h4_compression_days:  int   = 0     # calendar days 4H EMA spread has been compressed < 3%
 
+    # 4H Transition Mode: EMA6 > EMA20 + EMA6 > EMA12 + 24H positive — partial bullish
+    h4_transitioning:     bool  = False
+
 
 @dataclass
 class FundResult:
@@ -467,6 +470,21 @@ def _mark_speed_alerted(symbol: str) -> None:
     stale = time.time() - 86_400
     for k in [k for k, ts in _speed_alerted.items() if ts < stale]:
         del _speed_alerted[k]
+
+
+# ── Early GC cooldown (5m EMA cross signal) ───────────────────────────────────
+_early_gc_alerted: dict[str, float] = {}
+
+
+def _on_early_gc_cooldown(symbol: str) -> bool:
+    return (time.time() - _early_gc_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_EARLY_GC_COOLDOWN_H * 3600
+
+
+def _mark_early_gc_alerted(symbol: str) -> None:
+    _early_gc_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in _early_gc_alerted.items() if ts < stale]:
+        del _early_gc_alerted[k]
 
 
 # ── Global per-coin cooldown — CHANGE 5A ─────────────────────────────────────
@@ -999,6 +1017,85 @@ def _check_15m_fasttrack(mexc_symbol: str) -> bool:
     return vol_prev3 > 0 and vol_last >= cfg.MOMENTUM_FT_15M_VOL_MULT * vol_prev3
 
 
+def _check_5m_gc(mexc_symbol: str) -> "dict | None":
+    """
+    Detect a fresh 5m EMA6/EMA20 golden cross for the Early GC signal.
+    Cross is fresh if EMA6 was below EMA20 three candles ago and is now above.
+    Returns dict with cross data, or None if conditions not met.
+    """
+    df = get_mexc_futures_klines(mexc_symbol, "5m", limit=30)
+    if df is None or len(df) < 15:
+        return None
+
+    closes = df["close"].astype(float)
+    vols   = df["volume"].astype(float)
+
+    ema6_s  = closes.ewm(span=6,  adjust=False).mean()
+    ema20_s = closes.ewm(span=20, adjust=False).mean()
+
+    m5_ema6  = float(ema6_s.iloc[-1])
+    m5_ema20 = float(ema20_s.iloc[-1])
+
+    # Fresh cross: was below EMA20 three candles ago, now above
+    if not (len(ema6_s) >= 3 and
+            float(ema6_s.iloc[-3]) < float(ema20_s.iloc[-3]) and
+            m5_ema6 > m5_ema20):
+        return None
+
+    # RSI6 on 5m
+    delta    = closes.diff()
+    gain     = delta.clip(lower=0)
+    loss     = (-delta).clip(lower=0)
+    avg_gain = gain.rolling(6).mean()
+    avg_loss = loss.rolling(6).mean()
+    rs       = avg_gain / avg_loss.replace(0, 1e-9)
+    rsi_s    = 100 - 100 / (1 + rs)
+    m5_rsi6  = float(rsi_s.iloc[-1]) if len(rsi_s) >= 6 else 50.0
+
+    if not (cfg.MOMENTUM_EARLY_GC_RSI_MIN <= m5_rsi6 <= cfg.MOMENTUM_EARLY_GC_RSI_MAX):
+        return None
+
+    # Volume: last candle vs MA10 of prior candles
+    vol_last  = float(vols.iloc[-1])
+    vol_ma10  = float(vols.iloc[-11:-1].mean()) if len(vols) >= 11 else vol_last
+    vol_ratio = vol_last / vol_ma10 if vol_ma10 > 0 else 0.0
+
+    if vol_ratio < cfg.MOMENTUM_EARLY_GC_VOL_MIN:
+        return None
+
+    return {
+        "m5_ema6":   round(m5_ema6, 8),
+        "m5_ema20":  round(m5_ema20, 8),
+        "m5_rsi6":   round(m5_rsi6, 1),
+        "vol_ratio": round(vol_ratio, 2),
+        "price":     float(closes.iloc[-1]),
+    }
+
+
+def _score_early_gc(tech: "TechResult | None", m5gc: dict, ath_dist_pct: float) -> int:
+    """Score an Early GC signal. Base 65; bonuses/penalties applied."""
+    score = 65
+
+    if tech is not None:
+        if tech.m15_ema6_gt_ema12 and tech.m15_ema_ok:
+            score += 5            # +5 if 15m fully bullish (EMA6 > EMA12 > EMA20)
+        if tech.h4_kdj_j < 60:
+            score += 3            # +3 if H4 KDJ < 60 (not overheated)
+        if tech.h4_kdj_j > 90:
+            score -= 5            # -5 if H4 KDJ > 90 (overheated)
+
+    if ath_dist_pct >= 80.0:
+        score += 5                # +5 if far from ATH (more room to run)
+
+    if m5gc["vol_ratio"] >= 2.0:
+        score += 5                # +5 if vol > 2× MA10
+
+    if m5gc["m5_rsi6"] > 65.0:
+        score -= 5                # -5 if RSI already elevated
+
+    return score
+
+
 def _check_speed_alert(mexc_symbol: str) -> "dict | None":
     """
     Detect explosive 15m candle moves for the Speed Alert Track.
@@ -1355,6 +1452,12 @@ def scan() -> list[MomentumResult]:
                               if fear_sep_ok else f"RS vs BTC {rs_vs_btc:+.1f}%")
                     log.info(f"  😟 FEAR bypass  {symbol}: {reason}")
 
+            # 4H Transition Mode: EMA6 above both EMA12 and EMA20 + 24H positive
+            if not tech.macro_ok and h4_ema6_gt20 and tech.h4_ema6 > tech.h4_ema12 and change_24h > 0:
+                tech.macro_ok = True
+                tech.h4_transitioning = True
+                log.info(f"  🔄 TRANSITION bypass  {symbol}: EMA6 > EMA12/EMA20 partial, 24H {change_24h:+.1f}%")
+
             if not tech.macro_ok:
                 macro_blocked_count += 1
                 if not h4_order_ok:
@@ -1411,6 +1514,10 @@ def scan() -> list[MomentumResult]:
 
         # Total score
         total = tech.score + fund.total + ath_pts
+
+        # 4H Transition Mode penalty: -5 pts for incomplete EMA stack
+        if tech.h4_transitioning:
+            total = max(0, total - 5)
 
         # Recommendation classification
         if total >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:
@@ -2236,14 +2343,125 @@ def scan() -> list[MomentumResult]:
     global _last_speed_count
     _last_speed_count = len(speed_alerts)
 
+    # ── Stage 2i: Early GC (5m EMA cross) pipeline ───────────────────────────
+    early_gc_alerts: list[MomentumResult] = []
+    _all_alerted_syms = {r.symbol for r in new_alerts + cooling_alerts + gc_alerts +
+                         vs_alerts + rb_alerts + pbw_alerts + sc_alerts + sq_alerts + speed_alerts}
+
+    # Candidate pool: union of gc_candidates (0.5-8%) + candidates (1.5-12%) → 0.5-12%
+    _seen_egc: set[str] = set()
+    _early_gc_source: list = []
+    for _e in gc_candidates + candidates:
+        if _e[0] not in _seen_egc:
+            _seen_egc.add(_e[0])
+            _early_gc_source.append(_e)
+
+    for entry in _early_gc_source:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
+
+        if symbol in _all_alerted_syms:
+            continue
+        if mcap < cfg.MOMENTUM_EARLY_GC_MCAP_MIN:
+            continue
+        if _on_early_gc_cooldown(symbol):
+            continue
+        if _on_global_cooldown(symbol, "EARLY GC", price):
+            continue
+
+        # Check 5m cross first (cheap — skip if no fresh cross)
+        m5gc = _check_5m_gc(mexc_symbol)
+        if m5gc is None:
+            continue
+
+        # Fetch technicals for 15m EMA check + 4H indicators
+        egc_tech = _check_technicals(mexc_symbol, cfg.MOMENTUM_VOL_GC_MIN)
+        if egc_tech is None:
+            continue
+
+        # 15m EMA6 > EMA20 required
+        if not egc_tech.m15_ema_ok:
+            log.debug(f"  EARLY_GC skip {symbol}: 15m EMA6 < EMA20")
+            continue
+
+        # 4H gate: accept if bullish OR transitioning (EMA6 > EMA12 AND EMA6 > EMA20 + 24H > 0)
+        h4_transition_ok = (egc_tech.h4_ema6 > egc_tech.h4_ema12 and
+                            egc_tech.h4_ema6 > egc_tech.h4_ema20 and
+                            change_24h > 0)
+        if not (egc_tech.h4_ema_ok or h4_transition_ok):
+            log.debug(f"  EARLY_GC skip {symbol}: 4H EMA bearish, no transition")
+            continue
+
+        if h4_transition_ok and not egc_tech.h4_ema_ok:
+            egc_tech.h4_transitioning = True
+
+        _egc_ath_dist, _egc_ath_price, _egc_ath_date = _lookup_ath(
+            _ath_map, symbol, price, egc_tech.ath_dist_pct)
+        egc_score = _score_early_gc(egc_tech, m5gc, _egc_ath_dist)
+
+        if egc_score < cfg.MOMENTUM_EARLY_GC_MIN_SCORE:
+            log.debug(f"  EARLY_GC skip {symbol}: score {egc_score} < {cfg.MOMENTUM_EARLY_GC_MIN_SCORE}")
+            continue
+
+        log.info(
+            f"  ⚡ EARLY GC  {symbol}  1h {change_1h:+.2f}%  "
+            f"5m RSI {m5gc['m5_rsi6']:.1f}  vol {m5gc['vol_ratio']:.1f}×  score {egc_score}"
+        )
+
+        egc_risk_usd = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_EARLY_GC_SL_PCT / 100.0, 2)
+        egc_rr_str   = f"1:{_rwd_tp1 / egc_risk_usd:.2f}"
+
+        # Store m5gc data in tech for alert builder access
+        egc_tech.m5_rsi6  = m5gc["m5_rsi6"]
+        egc_tech.m5_ema20 = m5gc["m5_ema20"]
+
+        early_gc_alerts.append(MomentumResult(
+            symbol          = symbol,
+            name            = name,
+            price           = round(price, 8),
+            change_1h       = round(change_1h, 2),
+            change_24h      = round(change_24h, 2),
+            market_cap      = mcap,
+            volume_24h      = vol_24h,
+            fdv             = fdv,
+            fdv_mcap_ratio  = round(fdv_ratio, 2),
+            circ_supply_pct = round(circ_pct, 1),
+            matched_tags    = matched_tags,
+            mexc_symbol     = mexc_symbol,
+            tech            = egc_tech,
+            total_score     = egc_score,
+            recommendation  = "EARLY GC",
+            rec_emoji       = "⚡",
+            warnings        = ["Early signal — reduced confirmation",
+                               "Use 50% of normal position size"],
+            m5_note         = "",
+            entry_price     = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), _price_decimals(price)),
+            stop_loss       = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_EARLY_GC_SL_PCT / 100), _price_decimals(price)),
+            tp1             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), _price_decimals(price)),
+            tp2             = round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), _price_decimals(price)),
+            risk_usd        = egc_risk_usd,
+            reward_tp1_usd  = _rwd_tp1,
+            reward_tp2_usd  = _rwd_tp2,
+            rr_str          = egc_rr_str,
+            sl_pct          = cfg.MOMENTUM_EARLY_GC_SL_PCT,
+            ath_dist_pct    = _egc_ath_dist,
+            ath_price       = _egc_ath_price,
+            ath_date        = _egc_ath_date,
+        ))
+        _mark_early_gc_alerted(symbol)
+        _mark_global_alerted(symbol, "EARLY GC", price)
+        _all_alerted_syms.add(symbol)
+
     # ── CHANGE 5B: Session-level dedup — one alert per coin per scan ────────────
     _DEDUP_PRIORITY = {
         "SQUEEZE": 8, "STRONG ENTRY": 7, "WATCH": 6, "RECOVERY": 5,
         "GOLDEN CROSS": 4, "STAIRCASE": 4, "VOLUME SPIKE": 3,
-        "PRE-BREAKOUT": 3, "SPEED ALERT": 3, "EARLY SIGNAL": 2, "COOLING_DOWN": 1,
+        "PRE-BREAKOUT": 3, "SPEED ALERT": 3, "EARLY SIGNAL": 2,
+        "EARLY GC": 2, "COOLING_DOWN": 1,
     }
     _all_this_scan = (new_alerts + cooling_alerts + gc_alerts + vs_alerts +
-                      rb_alerts + pbw_alerts + sc_alerts + sq_alerts + speed_alerts)
+                      rb_alerts + pbw_alerts + sc_alerts + sq_alerts + speed_alerts +
+                      early_gc_alerts)
     _best_per_sym: dict[str, MomentumResult] = {}
     for _r in _all_this_scan:
         _prev = _best_per_sym.get(_r.symbol)
@@ -2264,15 +2482,16 @@ def scan() -> list[MomentumResult]:
                     f"dropped {_r.recommendation} ({_r.total_score})"
                 )
     _keep_ids = {id(r) for r in _best_per_sym.values()}
-    new_alerts     = [r for r in new_alerts     if id(r) in _keep_ids]
-    cooling_alerts = [r for r in cooling_alerts if id(r) in _keep_ids]
-    gc_alerts      = [r for r in gc_alerts      if id(r) in _keep_ids]
-    vs_alerts      = [r for r in vs_alerts      if id(r) in _keep_ids]
-    rb_alerts      = [r for r in rb_alerts      if id(r) in _keep_ids]
-    pbw_alerts     = [r for r in pbw_alerts     if id(r) in _keep_ids]
-    sc_alerts      = [r for r in sc_alerts      if id(r) in _keep_ids]
-    sq_alerts      = [r for r in sq_alerts      if id(r) in _keep_ids]
-    speed_alerts   = [r for r in speed_alerts   if id(r) in _keep_ids]
+    new_alerts      = [r for r in new_alerts      if id(r) in _keep_ids]
+    cooling_alerts  = [r for r in cooling_alerts  if id(r) in _keep_ids]
+    gc_alerts       = [r for r in gc_alerts       if id(r) in _keep_ids]
+    vs_alerts       = [r for r in vs_alerts       if id(r) in _keep_ids]
+    rb_alerts       = [r for r in rb_alerts       if id(r) in _keep_ids]
+    pbw_alerts      = [r for r in pbw_alerts      if id(r) in _keep_ids]
+    sc_alerts       = [r for r in sc_alerts       if id(r) in _keep_ids]
+    sq_alerts       = [r for r in sq_alerts       if id(r) in _keep_ids]
+    speed_alerts    = [r for r in speed_alerts    if id(r) in _keep_ids]
+    early_gc_alerts = [r for r in early_gc_alerts if id(r) in _keep_ids]
 
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
@@ -2284,6 +2503,7 @@ def scan() -> list[MomentumResult]:
     sc_n    = len(sc_alerts)
     sq_n    = len(sq_alerts)
     sp_n    = len(speed_alerts)
+    egc_n   = len(early_gc_alerts)
     cooling = len(cooling_alerts)
     log.info(
         f"Scan done — {len(candidates)} M1–M7, "
@@ -2291,10 +2511,10 @@ def scan() -> list[MomentumResult]:
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
         f"{strong} STRONG + {watch} WATCH + {early} EARLY + "
         f"{gc} GC + {vs} VS + {rb} RB + {pbw} PBW + {sc_n} SC + {sq_n} SQ + "
-        f"{sp_n} SPEED + {cooling} COOLING alerts."
+        f"{sp_n} SPEED + {egc_n} EARLY_GC + {cooling} COOLING alerts."
     )
     return (new_alerts + cooling_alerts + gc_alerts + vs_alerts + rb_alerts +
-            pbw_alerts + sc_alerts + sq_alerts + speed_alerts)
+            pbw_alerts + sc_alerts + sq_alerts + speed_alerts + early_gc_alerts)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
