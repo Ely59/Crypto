@@ -555,6 +555,277 @@ def _add_to_watchlist(symbol: str, price: float, signal_type: str, leg_number: i
         del _alert_watchlist[k]
 
 
+# ── RADAR / SIGNAL cooldowns ──────────────────────────────────────────────────
+_radar_alerted:  dict[str, float] = {}
+_signal_alerted: dict[str, float] = {}
+
+
+def _on_radar_cooldown(symbol: str) -> bool:
+    return (time.time() - _radar_alerted.get(symbol, 0.0)) < cfg.RADAR_COOLDOWN_MIN * 60
+
+
+def _mark_radar_alerted(symbol: str) -> None:
+    _radar_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in list(_radar_alerted.items()) if ts < stale]:
+        del _radar_alerted[k]
+
+
+def _on_signal_cooldown(symbol: str) -> bool:
+    return (time.time() - _signal_alerted.get(symbol, 0.0)) < cfg.SIGNAL_COOLDOWN_MIN * 60
+
+
+def _mark_signal_alerted(symbol: str) -> None:
+    _signal_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in list(_signal_alerted.items()) if ts < stale]:
+        del _signal_alerted[k]
+
+
+def _fetch_aggregated_klines(mexc_symbol: str, minutes: int) -> "pd.DataFrame | None":
+    """Fetch 1m futures klines and resample to `minutes`-minute bars."""
+    import pandas as pd
+    raw_limit = min(200, 15 * minutes)
+    df_1m = get_mexc_futures_klines(mexc_symbol, "1m", limit=raw_limit)
+    if df_1m is None or len(df_1m) < 6:
+        return None
+    try:
+        resampled = (
+            df_1m.resample(f"{minutes}min")
+            .agg({"open": "first", "high": "max", "low": "min",
+                  "close": "last", "volume": "sum"})
+            .dropna(subset=["close"])
+        )
+        return resampled if len(resampled) >= 5 else None
+    except Exception as e:
+        log.debug(f"Resample {mexc_symbol} {minutes}m failed: {e}")
+        return None
+
+
+def _check_3m(mexc_symbol: str) -> "dict | None":
+    """
+    3m precision check for RADAR conditions.
+    Returns dict with ok=True when: price > EMA20 AND RSI6 > 42 AND RSI6 rising.
+    """
+    df = _fetch_aggregated_klines(mexc_symbol, 3)
+    if df is None:
+        return None
+    close   = df["close"]
+    ema20_s = compute_ema(close, 20)
+    rsi_s   = compute_rsi(close, period=6)
+    if len(rsi_s) < 3:
+        return None
+    rsi_now  = float(rsi_s.iloc[-1])
+    rsi_prev = float(rsi_s.iloc[-3])   # 2 candles ago
+    price    = float(close.iloc[-1])
+    ema20_v  = float(ema20_s.iloc[-1])
+    price_gt = price > ema20_v
+    rsi_ok   = rsi_now > cfg.RADAR_3M_RSI_MIN
+    rsi_rise = rsi_now > rsi_prev
+    return {
+        "price_gt_ema20": price_gt,
+        "rsi6":           round(rsi_now, 1),
+        "rsi_rising":     rsi_rise,
+        "ok":             price_gt and rsi_ok and rsi_rise,
+    }
+
+
+def _check_10m(mexc_symbol: str) -> "dict | None":
+    """
+    10m EMA6/EMA20 cross detection.
+    Returns {"ema6_gt_ema20": bool, "just_crossed": bool, ...}.
+    """
+    df = _fetch_aggregated_klines(mexc_symbol, 10)
+    if df is None:
+        return None
+    close  = df["close"]
+    ema6_s = compute_ema(close, 6)
+    ema20_s = compute_ema(close, 20)
+    if len(ema6_s) < 3:
+        return None
+    ema6_now   = float(ema6_s.iloc[-1])
+    ema20_now  = float(ema20_s.iloc[-1])
+    ema6_prev  = float(ema6_s.iloc[-2])
+    ema20_prev = float(ema20_s.iloc[-2])
+    crossed      = ema6_now > ema20_now
+    just_crossed = (ema6_prev <= ema20_prev) and crossed
+    return {
+        "ema6_gt_ema20": crossed,
+        "just_crossed":  just_crossed,
+        "ema6":          round(ema6_now, 8),
+        "ema20":         round(ema20_now, 8),
+    }
+
+
+def scan_radar_and_signal(
+    margin:   float | None = None,
+    leverage: int   | None = None,
+) -> "tuple[list[dict], list[dict]]":
+    """
+    Scan _active_watch for RADAR (pre-signal) and SIGNAL (10m cross confirmed) alerts.
+
+    RADAR fires when: 3m ok + 5m approaching/crossed + 4H ok + 10m NOT yet crossed.
+    SIGNAL fires when: same but 10m crossed AND ≥3/5 TF conditions pass.
+
+    Returns (radar_list, signal_list) — each element is a plain dict for the alert builder.
+    margin / leverage default to config values when not supplied.
+    """
+    if not _active_watch:
+        return [], []
+
+    import config as _cfg
+    _margin   = margin   if margin   is not None else _cfg.DEFAULT_MARGIN_USDT
+    _leverage = leverage if leverage is not None else _cfg.DEFAULT_LEVERAGE
+
+    # Clamp margin to safe range
+    _margin = max(_cfg.MARGIN_MIN_USDT, min(_cfg.MARGIN_MAX_USDT, _margin))
+
+    _ath_map = get_coingecko_ath_map(limit=500)
+    radar_results:  list[dict] = []
+    signal_results: list[dict] = []
+
+    for mexc_symbol in list(_active_watch):
+        symbol = mexc_symbol.replace("_USDT", "")
+
+        on_radar  = _on_radar_cooldown(symbol)
+        on_signal = _on_signal_cooldown(symbol)
+        if on_radar and on_signal:
+            continue
+
+        # ── Fast 3m check (cheap: 1m fetch + resample) ───────────────────────
+        m3 = _check_3m(mexc_symbol)
+        if not m3 or not m3["ok"]:
+            continue
+
+        # ── 5m check (use cache if available) ────────────────────────────────
+        m5 = _m5_cache.get(mexc_symbol) or _check_5m(mexc_symbol)
+        if not m5:
+            continue
+
+        ema6_v  = m5.get("ema6",  0.0)
+        ema20_v = m5.get("ema20", 0.0)
+        if ema20_v > 0:
+            spread_pct = abs(ema6_v - ema20_v) / ema20_v * 100.0
+            approaching = spread_pct < _cfg.RADAR_5M_EMA_APPROACH_PCT and ema6_v < ema20_v
+        else:
+            approaching = False
+        crossed_5m  = m5.get("fresh_cross", False) or m5.get("ema6_gt_ema20", False)
+        rsi5_ok     = _cfg.RADAR_5M_RSI_MIN <= m5.get("rsi6", 0) <= _cfg.RADAR_5M_RSI_MAX
+        m5_ok       = (approaching or crossed_5m) and rsi5_ok
+        if not m5_ok:
+            continue
+
+        # ── 10m cross check (resamples from 1m — one shared API call) ────────
+        m10 = _check_10m(mexc_symbol)
+        m10_crossed = bool(m10 and m10.get("ema6_gt_ema20"))
+
+        # ── 4H + 15m technicals (most expensive — only fetch when pre-checks pass) ─
+        tech = _check_technicals(mexc_symbol)
+        if tech is None:
+            continue
+
+        h4_ok  = bool(tech.h4_ema_ok or tech.h4_method_b or tech.h4_transitioning)
+        m15_ok = bool(tech.m15_ema6_gt_ema12 and tech.m15_rsi6 < 78)
+
+        if not h4_ok:
+            continue
+
+        conds = {
+            "3m":  True,
+            "5m":  True,
+            "10m": m10_crossed,
+            "15m": m15_ok,
+            "4H":  h4_ok,
+        }
+        cond_score = sum(conds.values())
+        price      = tech.m15_price
+        if price <= 0:
+            continue
+
+        _ath_dist, _ath_px, _ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
+
+        if m10_crossed and cond_score >= _cfg.SIGNAL_MIN_CONDITIONS and not on_signal:
+            # ── SIGNAL ────────────────────────────────────────────────────────
+            if _on_global_cooldown(symbol, "SIGNAL", price):
+                continue
+
+            # Trade levels: SL -5%, TP1 +8%, TP2 +15%
+            bk_price = tech.h24_high * 1.005 if tech.h24_high > 0 else price * 1.005
+            pb_price = tech.m5_ema20 if tech.m5_ema20 > 0 and tech.m5_ema20 < price else price * 0.97
+
+            def _levels(p: float) -> tuple:
+                sl  = p * (1 - _cfg.MOMENTUM_SL_PCT / 100)
+                tp1 = p * (1 + _cfg.MOMENTUM_TP1_PCT / 100)
+                tp2 = p * (1 + _cfg.MOMENTUM_TP2_PCT / 100)
+                return sl, tp1, tp2
+
+            bk_sl, bk_tp1, bk_tp2 = _levels(bk_price)
+            pb_sl, pb_tp1, pb_tp2 = _levels(pb_price)
+
+            pos_size     = _margin * _leverage
+            profit_tp1   = pos_size * (_cfg.MOMENTUM_TP1_PCT / 100) * 0.60
+            profit_tp2   = pos_size * (_cfg.MOMENTUM_TP2_PCT / 100) * 0.40
+
+            result = {
+                "type":        "SIGNAL",
+                "symbol":      symbol,
+                "mexc_symbol": mexc_symbol,
+                "price":       round(price, 8),
+                "conds":       conds,
+                "cond_score":  cond_score,
+                "tech":        tech,
+                "bk_price":   round(bk_price, 8),
+                "bk_sl":      round(bk_sl,    8),
+                "bk_tp1":     round(bk_tp1,   8),
+                "bk_tp2":     round(bk_tp2,   8),
+                "pb_price":   round(pb_price, 8),
+                "pb_sl":      round(pb_sl,    8),
+                "pb_tp1":     round(pb_tp1,   8),
+                "pb_tp2":     round(pb_tp2,   8),
+                "margin":      _margin,
+                "leverage":    _leverage,
+                "position_size": round(pos_size, 2),
+                "profit_tp1":  round(profit_tp1, 2),
+                "profit_tp2":  round(profit_tp2, 2),
+                "ath_dist_pct": round(_ath_dist, 1),
+                "ath_price":   _ath_px,
+                "ath_date":    _ath_date,
+            }
+            signal_results.append(result)
+            _mark_signal_alerted(symbol)
+            _mark_global_alerted(symbol, "SIGNAL", price)
+            log.info(
+                f"  🟢 SIGNAL  {symbol}  {cond_score}/5 conds  "
+                f"bk={bk_price:.4g}  pb={pb_price:.4g}"
+            )
+
+        elif not m10_crossed and not on_radar:
+            # ── RADAR ─────────────────────────────────────────────────────────
+            result = {
+                "type":        "RADAR",
+                "symbol":      symbol,
+                "mexc_symbol": mexc_symbol,
+                "price":       round(price, 8),
+                "conds":       conds,
+                "m3_rsi6":     m3["rsi6"],
+                "m5_rsi6":     round(m5.get("rsi6", 0), 1),
+                "tech":        tech,
+                "ath_dist_pct": round(_ath_dist, 1),
+            }
+            radar_results.append(result)
+            _mark_radar_alerted(symbol)
+            log.info(
+                f"  👁️ RADAR  {symbol}  3m RSI {m3['rsi6']:.0f}  "
+                f"5m {'cross' if crossed_5m else 'approach'}"
+            )
+
+    log.info(
+        f"RADAR/SIGNAL scan done — "
+        f"{len(radar_results)} RADAR, {len(signal_results)} SIGNAL."
+    )
+    return radar_results, signal_results
+
+
 def get_global_cooldown_status() -> list:
     """Return [(symbol, seconds_remaining, rec_type), ...] sorted longest-remaining first."""
     now    = time.time()
@@ -990,6 +1261,7 @@ def _check_5m(mexc_symbol: str) -> "dict | None":
         "first_green":        m5_price > m5_open_last,
         "vol_pct":            round(m5_vol_pct, 1),
         "vol_recent_pct":     round(vol_recent_pct, 1),
+        "ema6":               m5_ema6,    # raw float — needed for RADAR approach check
         "ema20":              m5_ema20,   # raw float for entry zone
         "candle_confirmed":   candle_confirmed,
         "is_spike":           is_spike,

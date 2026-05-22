@@ -400,6 +400,33 @@ MOMENTUM_GLOBAL_SQ_EXCEPTION_PCT   = 10.0   # SQ exception fires if price moved 
 # ─── Alert logging (FIX 6) ───────────────────────────────────────────────────
 ALERT_LOG_CSV = "logs/alert_log.csv"
 
+# ─── MEXC Trading API (authenticated) ────────────────────────────────────────
+MEXC_API_KEY    = os.getenv("MEXC_API_KEY", "").strip()
+MEXC_API_SECRET = os.getenv("MEXC_API_SECRET", "").strip()
+
+# ─── Trading defaults (session-overridable via /setmargin, /setleverage) ─────
+DEFAULT_MARGIN_USDT = float(os.getenv("DEFAULT_MARGIN_USDT", "10").strip() or "10")
+DEFAULT_LEVERAGE    = int(os.getenv("DEFAULT_LEVERAGE",    "5").strip()  or "5")
+
+# ─── Safety rules ─────────────────────────────────────────────────────────────
+MAX_OPEN_POSITIONS    = 2      # hard cap on concurrent bot-placed positions
+DAILY_LOSS_LIMIT_PCT  = 15.0   # block new orders when cumulative risk > 15% of balance
+MARGIN_MIN_USDT       = 5.0    # minimum margin per order
+MARGIN_MAX_USDT       = 50.0   # maximum margin per order
+LARGE_ORDER_THRESHOLD = 20.0   # extra confirmation required when margin > this
+
+# ─── RADAR / SIGNAL signal ────────────────────────────────────────────────────
+RADAR_COOLDOWN_MIN        = 120    # 2H per coin
+SIGNAL_COOLDOWN_MIN       = 120    # 2H per coin
+RADAR_3M_RSI_MIN          = 42.0   # 3m RSI6 must be above this
+RADAR_5M_EMA_APPROACH_PCT = 0.15   # 5m EMA6 within this % of EMA20 = "approaching"
+RADAR_5M_RSI_MIN          = 35.0   # 5m RSI6 lower bound
+RADAR_5M_RSI_MAX          = 68.0   # 5m RSI6 upper bound
+SIGNAL_MIN_CONDITIONS     = 3      # minimum TF conditions (out of 5) for SIGNAL
+
+# ─── Trade log ────────────────────────────────────────────────────────────────
+TRADE_LOG_CSV = "logs/trade_log.csv"
+
 # ─── Unified warning thresholds ──────────────────────────────────────────────
 MOMENTUM_WARN_CIRC_ALERT_PCT  = 60.0   # circ rate warning if below this
 MOMENTUM_WARN_FDV_ALERT_RATIO = 2.5    # FDV/MCap warning if above this

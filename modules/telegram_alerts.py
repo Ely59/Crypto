@@ -37,11 +37,13 @@ if _ROOT not in _sys.path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+import json
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo      # stdlib Python 3.9+
 
-from telegram           import Bot
-from telegram.constants import ParseMode
+from telegram                  import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.constants        import ParseMode
 
 from utils.logger import get_logger
 import config as cfg
@@ -50,6 +52,10 @@ log = get_logger(__name__)
 
 # Stuttgart = Central European Time, auto-switches CET↔CEST
 _STUTTGART_TZ = ZoneInfo("Europe/Berlin")
+
+# ── Pending SIGNAL orders — keyed by short ID, read by main.py callback handler ─
+# Format: {short_id: {"type": "breakout"|"pullback", "symbol": ..., "price": ..., ...}}
+_pending_signal_orders: dict[str, dict] = {}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Core send infrastructure
@@ -109,6 +115,52 @@ def send_message(text: str) -> bool:
         chunks.append("".join(current))
 
     return all(asyncio.run(_send_async(chunk)) for chunk in chunks)
+
+
+async def _send_with_buttons_async(text: str, markup: InlineKeyboardMarkup) -> tuple[bool, int | None]:
+    """Send a message with inline keyboard buttons. Returns (success, message_id)."""
+    if not cfg.TELEGRAM_CHAT_ID or not cfg.TELEGRAM_BOT_TOKEN:
+        log.error("Telegram credentials not set.")
+        return False, None
+    try:
+        async with Bot(token=cfg.TELEGRAM_BOT_TOKEN) as bot:
+            msg = await bot.send_message(
+                chat_id                  = int(cfg.TELEGRAM_CHAT_ID),
+                text                     = text,
+                parse_mode               = ParseMode.HTML,
+                reply_markup             = markup,
+                disable_web_page_preview = True,
+            )
+        return True, msg.message_id
+    except Exception as e:
+        log.error(f"Telegram send-with-buttons failed: {e}")
+        return False, None
+
+
+async def _edit_message_async(chat_id: int, message_id: int, text: str) -> bool:
+    """Edit an existing message text (removes inline keyboard)."""
+    try:
+        async with Bot(token=cfg.TELEGRAM_BOT_TOKEN) as bot:
+            await bot.edit_message_text(
+                chat_id    = chat_id,
+                message_id = message_id,
+                text       = text,
+                parse_mode = ParseMode.HTML,
+            )
+        return True
+    except Exception as e:
+        log.warning(f"edit_message failed: {e}")
+        return False
+
+
+def send_message_with_buttons(text: str, markup: InlineKeyboardMarkup) -> tuple[bool, int | None]:
+    """Synchronous wrapper — safe to call from scheduler jobs."""
+    return asyncio.run(_send_with_buttons_async(text, markup))
+
+
+def edit_signal_message(chat_id: int, message_id: int, text: str) -> bool:
+    """Synchronous wrapper for editing a previously sent signal message."""
+    return asyncio.run(_edit_message_async(chat_id, message_id, text))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1965,6 +2017,170 @@ def send_scout_alert(coin, level: int) -> bool:
         return send_message(build_scout_level2_alert(coin))
     log.info(f"Sending Level-1 Radar alert for {coin.symbol}…")
     return send_message(build_scout_level1_alert(coin))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RADAR alert (Part A) — simple awareness message, no buttons
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_radar_alert(info: dict) -> str:
+    """
+    Simple RADAR awareness message. No trade action required.
+    info keys: symbol, mexc_symbol, price, conds, m3_rsi6, m5_rsi6, tech
+    """
+    sym   = info["symbol"]
+    price = info["price"]
+    conds = info.get("conds", {})
+
+    def ck(key: str) -> str:
+        return "✅" if conds.get(key) else "❌"
+
+    fd  = _fmt_price_dollar
+    return (
+        f"👁️ <b>RADAR: {sym}</b> — conditions forming\n"
+        f"{_SEP}\n"
+        f"3m {ck('3m')} | 5m {ck('5m')} | 10m ❌ | 15m {ck('15m')} | 4H {ck('4H')}\n"
+        f"\n"
+        f"<b>{sym}</b> is building momentum.\n"
+        f"Watching for 10m cross to confirm.\n"
+        f"Current: {fd(price)}\n"
+        f"{_SEP}"
+    )
+
+
+def send_radar_alert(info: dict) -> bool:
+    """Send a RADAR awareness alert."""
+    log.info(f"Sending RADAR alert for {info.get('symbol')} @ {info.get('price'):.4g}")
+    return send_message(build_radar_alert(info))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIGNAL alert (Part B) — with Telegram InlineKeyboard buttons
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _short_id() -> str:
+    """Generate a short unique ID for pending signal order storage."""
+    return f"{int(time.time()) % 1_000_000:06d}"
+
+
+def build_signal_text(info: dict) -> str:
+    """
+    Build the SIGNAL alert message body.
+    info keys: symbol, price, conds, cond_score, tech, bk_price, bk_sl, bk_tp1, bk_tp2,
+               pb_price, pb_sl, pb_tp1, pb_tp2, margin, leverage, position_size,
+               profit_tp1, profit_tp2, ath_dist_pct
+    """
+    sym        = info["symbol"]
+    conds      = info.get("conds", {})
+    tech       = info.get("tech")
+    score      = info.get("cond_score", 0)
+    margin     = info.get("margin", 10)
+    leverage   = info.get("leverage", 5)
+    pos_size   = info.get("position_size", margin * leverage)
+    p_tp1      = info.get("profit_tp1", 0)
+    p_tp2      = info.get("profit_tp2", 0)
+    ath_dist   = info.get("ath_dist_pct", 0)
+
+    def ck(key: str) -> str:
+        return "✅" if conds.get(key) else "❌"
+
+    fd  = _fmt_price_dollar
+
+    # Auto-sentence
+    tf_ok = [k for k, v in conds.items() if v]
+    tf_str = ", ".join(tf_ok) if tf_ok else "multiple timeframes"
+    s_em = _score_emoji(min(score * 20, 100))
+
+    line1    = f"🟢 <b>{sym}</b> — SIGNAL {score}/5{s_em}"
+    sep      = _SEP
+    sentence = f'"{sym} momentum confirmed on {tf_str}. {ath_dist:.0f}% below ATH."'
+    tf_row   = f"3m {ck('3m')} 5m {ck('5m')} 10m ✅ 15m {ck('15m')} 4H {ck('4H')}"
+
+    bk_block = (
+        f"📊 <b>BREAKOUT</b> {fd(info['bk_price'])}\n"
+        f"   SL {fd(info['bk_sl'])} | TP1 {fd(info['bk_tp1'])} | TP2 {fd(info['bk_tp2'])}\n"
+        f"   TP1 profit: +${p_tp1:.2f} | TP2: +${p_tp2:.2f}"
+    )
+    pb_block = (
+        f"📊 <b>PULLBACK</b> {fd(info['pb_price'])}\n"
+        f"   SL {fd(info['pb_sl'])} | TP1 {fd(info['pb_tp1'])} | TP2 {fd(info['pb_tp2'])}\n"
+        f"   TP1 profit: +${p_tp1:.2f} | TP2: +${p_tp2:.2f}"
+    )
+    margin_line = f"Margin: ${margin:.0f} × {leverage}x = ${pos_size:.0f}"
+
+    return "\n".join([
+        line1, sep, sentence, "", tf_row, "", bk_block, "", pb_block, "", margin_line, sep,
+    ])
+
+
+def send_signal_alert(info: dict) -> tuple[bool, int | None]:
+    """
+    Send SIGNAL alert with InlineKeyboard.
+    Stores pending order details in _pending_signal_orders.
+    Returns (success, message_id) — message_id is needed to edit after button press.
+    """
+    sym = info["symbol"]
+
+    # Register pending orders (breakout and pullback variants)
+    bk_id = _short_id()
+    time.sleep(0.001)   # ensure unique timestamp
+    pb_id = _short_id() + "p"
+
+    _pending_signal_orders[bk_id] = {
+        "order_type": "breakout",
+        "symbol":     sym,
+        "mexc_symbol": info.get("mexc_symbol", f"{sym}_USDT"),
+        "side":       "BUY",
+        "price":      info["bk_price"],
+        "sl":         info["bk_sl"],
+        "tp1":        info["bk_tp1"],
+        "tp2":        info["bk_tp2"],
+        "margin":     info["margin"],
+        "leverage":   info["leverage"],
+        "created_at": time.time(),
+    }
+    _pending_signal_orders[pb_id] = {
+        "order_type": "pullback",
+        "symbol":     sym,
+        "mexc_symbol": info.get("mexc_symbol", f"{sym}_USDT"),
+        "side":       "BUY",
+        "price":      info["pb_price"],
+        "sl":         info["pb_sl"],
+        "tp1":        info["pb_tp1"],
+        "tp2":        info["pb_tp2"],
+        "margin":     info["margin"],
+        "leverage":   info["leverage"],
+        "created_at": time.time(),
+    }
+
+    # Expire old pending orders (>24H)
+    stale = time.time() - 86_400
+    for k in [k for k, v in list(_pending_signal_orders.items()) if v.get("created_at", 0) < stale]:
+        del _pending_signal_orders[k]
+
+    fd  = _fmt_price_dollar
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"✅ BREAKOUT {fd(info['bk_price'])}",
+                callback_data=json.dumps({"a": "o", "id": bk_id}, separators=(",", ":")),
+            ),
+            InlineKeyboardButton(
+                f"✅ PULLBACK {fd(info['pb_price'])}",
+                callback_data=json.dumps({"a": "o", "id": pb_id}, separators=(",", ":")),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Skip",
+                callback_data=json.dumps({"a": "s", "sym": sym}, separators=(",", ":")),
+            ),
+        ],
+    ])
+
+    text = build_signal_text(info)
+    log.info(f"Sending SIGNAL alert for {sym} with buttons (bk={info['bk_price']:.4g})")
+    return send_message_with_buttons(text, keyboard)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -21,6 +21,8 @@ APScheduler uses this directly, so CET↔CEST transitions are handled automatica
 
 import argparse
 import asyncio
+import json
+import os
 import threading
 from datetime import datetime, timedelta
 
@@ -33,6 +35,7 @@ import modules.altcoin_scout        as m2
 import modules.btc_trading_support  as m3
 import modules.telegram_alerts      as m4
 import modules.momentum_scanner     as m5
+import modules.mexc_trader          as trader
 import modules.alert_logger         as m_log
 from modules.stats_tracker import tracker
 import config as cfg
@@ -41,6 +44,13 @@ from utils.logger import get_logger
 log = get_logger("main")
 
 _BERLIN_TZ = "Europe/Berlin"
+
+# ── Maintenance mode — set True to pause all jobs while keeping Telegram alive ─
+MAINTENANCE_MODE: bool = True
+
+# ── Session trading settings (overridable via /setmargin and /setleverage) ────
+_session_margin:   float = cfg.DEFAULT_MARGIN_USDT
+_session_leverage: int   = cfg.DEFAULT_LEVERAGE
 
 # ── Shared state — BTC two-phase pipeline ─────────────────────────────────────
 _current_btc_setup: "m3.TradeSetup | None" = None
@@ -312,6 +322,38 @@ def run_tier3_scan():
     log.info(f"Tier 3 scan: {len(results)} leg continuation(s) sent.")
 
 
+def run_radar_signal_scan():
+    """
+    RADAR / SIGNAL scan — every 5 minutes.
+    Checks active_watch coins for 3m+5m+4H momentum forming (RADAR) or
+    10m EMA cross confirmed (SIGNAL with Telegram buttons).
+    """
+    global _session_margin, _session_leverage
+    log.info("RADAR/SIGNAL scan: starting…")
+    try:
+        radar_list, signal_list = m5.scan_radar_and_signal(
+            margin=_session_margin, leverage=_session_leverage
+        )
+    except Exception as exc:
+        log.error(f"RADAR/SIGNAL scan FAILED: {exc}")
+        return
+
+    for info in radar_list:
+        m4.send_radar_alert(info)
+
+    for info in signal_list:
+        ok, msg_id = m4.send_signal_alert(info)
+        if ok:
+            log.info(f"SIGNAL alert sent for {info['symbol']}, msg_id={msg_id}")
+
+    if radar_list or signal_list:
+        log.info(
+            f"RADAR/SIGNAL scan: {len(radar_list)} RADAR, {len(signal_list)} SIGNAL sent."
+        )
+    else:
+        log.debug("RADAR/SIGNAL scan: no new alerts.")
+
+
 def run_m5_daily_summary():
     """
     Module 5 daily summary — runs at 08:01 Stuttgart, right after the briefing.
@@ -345,17 +387,182 @@ def _command_poll_loop() -> None:
     asyncio.run(_command_poll_async())
 
 
+async def _handle_callback(cq, bot) -> None:
+    """
+    Handle Telegram inline keyboard button presses (Part D).
+    cq = telegram.CallbackQuery object.
+    """
+    global _session_margin, _session_leverage
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    from telegram.constants import ParseMode
+
+    authorized = str(cfg.TELEGRAM_CHAT_ID).strip()
+    if str(cq.from_user.id) != authorized and str(cq.message.chat_id) != authorized:
+        await cq.answer("Unauthorized.", show_alert=True)
+        return
+
+    try:
+        data = json.loads(cq.data)
+    except (json.JSONDecodeError, TypeError):
+        await cq.answer("Invalid callback data.")
+        return
+
+    action = data.get("a", "")
+
+    # ── SKIP ──────────────────────────────────────────────────────────────────
+    if action == "s":
+        sym = data.get("sym", "?")
+        await cq.answer("Skipped ✓")
+        try:
+            await cq.message.edit_text(
+                cq.message.text_html + "\n\n❌ <b>Skipped</b>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        trader.log_trade(sym, "skip", 0.0, 0.0, 0, "", "skipped")
+        log.info(f"SIGNAL skipped: {sym}")
+        return
+
+    # ── PLACE ORDER ───────────────────────────────────────────────────────────
+    if action == "o":
+        order_id = data.get("id", "")
+        order_info = m4._pending_signal_orders.get(order_id)
+        if not order_info:
+            await cq.answer("Order expired. Re-scan for a fresh signal.", show_alert=True)
+            return
+
+        margin   = order_info.get("margin",   _session_margin)
+        leverage = order_info.get("leverage", _session_leverage)
+        sym      = order_info["symbol"]
+        price    = order_info["price"]
+        otype    = order_info.get("order_type", "breakout")
+
+        # Rule 4: large order confirmation
+        if margin > cfg.LARGE_ORDER_THRESHOLD:
+            confirm_id = f"c{order_id}"
+            m4._pending_signal_orders[confirm_id] = order_info
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Confirm", callback_data=json.dumps({"a": "c", "id": order_id}, separators=(",", ":"))),
+                InlineKeyboardButton("❌ Cancel",  callback_data=json.dumps({"a": "x", "id": order_id}, separators=(",", ":"))),
+            ]])
+            await cq.answer()
+            async with bot:
+                await bot.send_message(
+                    chat_id      = cq.message.chat_id,
+                    text         = f"⚠️ Large order: ${margin:.0f}. Confirm?",
+                    reply_markup = keyboard,
+                    parse_mode   = ParseMode.HTML,
+                )
+            return
+
+        # Fall through to actual order placement (same as action "c")
+        data["a"] = "c"
+
+    # ── CONFIRM ORDER (after large-order check) ───────────────────────────────
+    if action in ("c", "o"):
+        order_id   = data.get("id", "")
+        order_info = m4._pending_signal_orders.get(order_id)
+        if not order_info:
+            await cq.answer("Order expired.", show_alert=True)
+            return
+
+        margin   = order_info.get("margin",   _session_margin)
+        leverage = order_info.get("leverage", _session_leverage)
+        sym      = order_info["symbol"]
+        price    = order_info["price"]
+        sl       = order_info["sl"]
+        tp1      = order_info["tp1"]
+        otype    = order_info.get("order_type", "breakout")
+
+        await cq.answer("Checking safety…")
+
+        # Safety checks (Part E)
+        ok, err_msg = trader.check_safety(margin)
+        if not ok:
+            async with bot:
+                await bot.send_message(
+                    chat_id    = cq.message.chat_id,
+                    text       = err_msg,
+                    parse_mode = ParseMode.HTML,
+                )
+            return
+
+        # Place the order
+        result = trader.place_futures_order(
+            symbol      = order_info.get("mexc_symbol", f"{sym}_USDT"),
+            side        = order_info.get("side", "BUY"),
+            order_type  = "LIMIT",
+            price       = price,
+            margin_usdt = margin,
+            leverage    = leverage,
+            sl_price    = sl,
+            tp1_price   = tp1,
+        )
+
+        if result and "error" not in result:
+            # Success
+            oid      = result.get("order_id", "?")
+            qty      = result.get("quantity", "?")
+            conf_msg = (
+                f"✅ ORDER PLACED — <b>{sym}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Type:  Long {leverage}x Isolated\n"
+                f"Entry: ${price:.6g}\n"
+                f"Qty:   {qty} {sym}\n"
+                f"SL:    ${sl:.6g} (-{cfg.MOMENTUM_SL_PCT:.0f}%)\n"
+                f"TP1:   ${tp1:.6g} (+{cfg.MOMENTUM_TP1_PCT:.0f}%)\n"
+                f"Margin: ${margin:.0f}\n"
+                f"Order ID: <code>{oid}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Monitor position in MEXC Futures"
+            )
+            trader.log_trade(sym, otype, price, margin, leverage, str(oid), "placed")
+            try:
+                await cq.message.edit_text(
+                    cq.message.text_html + f"\n\n✅ <b>{otype.upper()} ORDER PLACED</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        else:
+            err = (result or {}).get("error", "Unknown error")
+            conf_msg = (
+                f"⚠️ Order failed: {err}\n"
+                f"Place manually:\n"
+                f"Entry: ${price:.6g} | SL: ${sl:.6g}"
+            )
+            trader.log_trade(sym, otype, price, margin, leverage, "", "failed")
+
+        async with bot:
+            await bot.send_message(
+                chat_id    = cq.message.chat_id,
+                text       = conf_msg,
+                parse_mode = ParseMode.HTML,
+            )
+        return
+
+    # ── CANCEL large-order confirmation ───────────────────────────────────────
+    if action == "x":
+        await cq.answer("Cancelled.")
+        try:
+            await cq.message.edit_text(cq.message.text_html + "\n\n❌ <b>Cancelled</b>",
+                                       parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+
 async def _command_poll_async() -> None:
     """
-    Long-poll the Telegram bot for incoming messages.
-    Responds to /status from the authorised chat ID.
+    Long-poll the Telegram bot for incoming messages and callback queries.
+    Handles text commands AND inline button presses.
     Runs indefinitely in its own event loop on a daemon thread.
     """
     from telegram import Bot
     from telegram.constants import ParseMode
 
     if not cfg.TELEGRAM_BOT_TOKEN:
-        log.warning("TELEGRAM_BOT_TOKEN not set — /status command disabled.")
+        log.warning("TELEGRAM_BOT_TOKEN not set — command listener disabled.")
         return
 
     bot        = Bot(token=cfg.TELEGRAM_BOT_TOKEN)
@@ -363,7 +570,6 @@ async def _command_poll_async() -> None:
     authorized = str(cfg.TELEGRAM_CHAT_ID).strip()
 
     async def _reply(to_chat: str, text: str) -> None:
-        """Send a command response, suppressing link previews."""
         async with bot:
             await bot.send_message(
                 chat_id                  = to_chat,
@@ -372,14 +578,25 @@ async def _command_poll_async() -> None:
                 disable_web_page_preview = True,
             )
 
-    log.info("Telegram command listener started (polling for /status).")
+    log.info("Telegram command listener started.")
 
     while True:
         try:
             async with bot:
                 updates = await bot.get_updates(offset=offset, timeout=20)
+
             for update in updates:
                 offset = update.update_id + 1
+
+                # ── Inline button callback ─────────────────────────────────
+                if update.callback_query:
+                    try:
+                        await _handle_callback(update.callback_query, bot)
+                    except Exception as cb_exc:
+                        log.warning(f"Callback handler error: {cb_exc}")
+                    continue
+
+                # ── Text command ────────────────────────────────────────────
                 msg = update.message
                 if msg is None:
                     continue
@@ -387,6 +604,10 @@ async def _command_poll_async() -> None:
                 text    = (msg.text or "").strip()
                 if chat_id != authorized:
                     continue
+
+                # Declare globals before assignment
+                global _session_margin, _session_leverage
+
                 if text.startswith("/status"):
                     reply = tracker.get_status()
                     async with bot:
@@ -411,11 +632,41 @@ async def _command_poll_async() -> None:
                     )
                     async with bot:
                         await bot.send_message(
-                            chat_id    = chat_id,
-                            text       = reply,
-                            parse_mode = ParseMode.HTML,
+                            chat_id=chat_id, text=reply, parse_mode=ParseMode.HTML,
                         )
                     log.info(f"/chatid: incoming={chat_id} configured={authorized}")
+                elif text.startswith("/setmargin"):
+                    parts = text.split()
+                    if len(parts) < 2:
+                        await _reply(chat_id, "Usage: /setmargin 10")
+                    else:
+                        try:
+                            val = float(parts[1])
+                            val = max(cfg.MARGIN_MIN_USDT, min(cfg.MARGIN_MAX_USDT, val))
+                            _session_margin = val
+                            await _reply(chat_id, f"✅ Margin set to <b>${val:.0f}</b> per trade")
+                            log.info(f"/setmargin → ${val:.0f}")
+                        except ValueError:
+                            await _reply(chat_id, "⚠️ Invalid amount. Example: /setmargin 10")
+                elif text.startswith("/setleverage"):
+                    parts = text.split()
+                    if len(parts) < 2:
+                        await _reply(chat_id, "Usage: /setleverage 5")
+                    else:
+                        try:
+                            val = max(1, min(20, int(parts[1])))
+                            _session_leverage = val
+                            await _reply(chat_id, f"✅ Leverage set to <b>{val}x</b>")
+                            log.info(f"/setleverage → {val}x")
+                        except ValueError:
+                            await _reply(chat_id, "⚠️ Invalid value. Example: /setleverage 5")
+                elif text.startswith("/balance"):
+                    bal = trader.get_account_balance()
+                    if bal is not None:
+                        await _reply(chat_id, f"💰 MEXC Balance: <b>${bal:.2f} USDT</b>")
+                    else:
+                        await _reply(chat_id, "⚠️ Could not fetch balance. Check API keys.")
+                    log.info("/balance replied.")
                 elif text.startswith("/coins"):
                     history = tracker.get_scan_history()
                     await _reply(chat_id, m4.build_coins_message(history))
@@ -450,6 +701,7 @@ async def _command_poll_async() -> None:
                 elif text.startswith("/help"):
                     await _reply(chat_id, m4.build_help_message())
                     log.info("/help replied.")
+
         except Exception as exc:
             log.warning(f"Command poll error (will retry): {exc}")
             await asyncio.sleep(10)
@@ -567,7 +819,16 @@ def start_scheduler():
         replace_existing = True,
     )
 
-    log.info("Scheduler started:")
+    # ── Job 10: RADAR/SIGNAL scan — every 5 minutes ───────────────────────────
+    scheduler.add_job(
+        func             = run_radar_signal_scan,
+        trigger          = CronTrigger(minute="*/5", timezone="UTC"),
+        id               = "radar_signal_5m",
+        name             = "5M RADAR/SIGNAL Scan",
+        replace_existing = True,
+    )
+
+    log.info("Scheduler registered:")
     log.info(f"  • Daily briefing     — 08:00 Stuttgart (Europe/Berlin)")
     log.info(f"  • M5 daily summary   — 08:01 Stuttgart (Europe/Berlin)")
     log.info(f"  • US market reminder — 15:30 Stuttgart (Europe/Berlin)")
@@ -576,16 +837,22 @@ def start_scheduler():
     log.info(f"  • Momentum Scanner   — every 15M at :02/:17/:32/:47 UTC  (Tier 1)")
     log.info(f"  • Tier 2             — every 5M  (active watch rescan)")
     log.info(f"  • Tier 3             — every 3M  (leg continuation)")
+    log.info(f"  • RADAR/SIGNAL       — every 5M  (10m cross detection)")
     log.info(f"  • Weekly Hit-Rate    — every Sunday 09:00 Berlin")
-    log.info("Press Ctrl+C to stop.")
 
-    # Start the /status command listener before blocking
+    # Start the /status command listener (always — keeps Telegram connection alive)
     _start_command_listener()
 
-    # Announce that the bot is online
-    m4.send_startup_message()
-    m4.send_startup_ping()
+    if MAINTENANCE_MODE:
+        scheduler.pause()   # freezes all 9 jobs; scheduler loop still blocks (keeps process alive)
+        log.warning("MAINTENANCE MODE: all scheduler jobs paused.")
+        m4.send_message("🔧 Bot in maintenance mode. Back soon.")
+        print("All jobs paused successfully")
+    else:
+        m4.send_startup_message()
+        m4.send_startup_ping()
 
+    log.info("Press Ctrl+C to stop.")
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
