@@ -203,13 +203,22 @@ def run_momentum_scan():
     try:
         results = m5.scan()
     except Exception as exc:
+        import traceback as _tb
         _consecutive_failures += 1
-        log.error(f"Momentum scan FAILED (failure #{_consecutive_failures}): {exc}")
+        tb_lines = _tb.format_exc().splitlines()
+        tb_short = "\n".join(tb_lines[:8])
+        log.error(
+            f"Momentum scan FAILED (failure #{_consecutive_failures}): {exc}\n"
+            f"Traceback (first 8 lines):\n{tb_short}"
+        )
 
-        if _consecutive_failures >= 3:
+        # Telegram notification: only on the 3rd failure; afterwards, throttled by
+        # send_message's own _send_fail_count guard to avoid spamming.
+        if _consecutive_failures == 3:
             m4.send_message(
-                "⚠️ <b>Scanner paused</b> — API issue detected.\n"
-                f"Failure #{_consecutive_failures}. Retrying in 5 min…"
+                "⚠️ <b>Scanner</b> — 3 consecutive failures.\n"
+                f"Error: <code>{str(exc)[:200]}</code>\n"
+                "Logging only until resolved. Retrying in 5 min…"
             )
 
         # Schedule a one-shot retry 5 minutes from now
@@ -453,13 +462,12 @@ async def _handle_callback(cq, bot) -> None:
                 InlineKeyboardButton("❌ Cancel",  callback_data=json.dumps({"a": "x", "id": order_id}, separators=(",", ":"))),
             ]])
             await cq.answer()
-            async with bot:
-                await bot.send_message(
-                    chat_id      = cq.message.chat_id,
-                    text         = f"⚠️ Large order: ${margin:.0f}. Confirm?",
-                    reply_markup = keyboard,
-                    parse_mode   = ParseMode.HTML,
-                )
+            await bot.send_message(
+                chat_id      = cq.message.chat_id,
+                text         = f"⚠️ Large order: ${margin:.0f}. Confirm?",
+                reply_markup = keyboard,
+                parse_mode   = ParseMode.HTML,
+            )
             return
 
         # Fall through to actual order placement (same as action "c")
@@ -486,12 +494,11 @@ async def _handle_callback(cq, bot) -> None:
         # Safety checks (Part E)
         ok, err_msg = trader.check_safety(margin)
         if not ok:
-            async with bot:
-                await bot.send_message(
-                    chat_id    = cq.message.chat_id,
-                    text       = err_msg,
-                    parse_mode = ParseMode.HTML,
-                )
+            await bot.send_message(
+                chat_id    = cq.message.chat_id,
+                text       = err_msg,
+                parse_mode = ParseMode.HTML,
+            )
             return
 
         # Place the order
@@ -540,12 +547,11 @@ async def _handle_callback(cq, bot) -> None:
             )
             trader.log_trade(sym, otype, price, margin, leverage, "", "failed")
 
-        async with bot:
-            await bot.send_message(
-                chat_id    = cq.message.chat_id,
-                text       = conf_msg,
-                parse_mode = ParseMode.HTML,
-            )
+        await bot.send_message(
+            chat_id    = cq.message.chat_id,
+            text       = conf_msg,
+            parse_mode = ParseMode.HTML,
+        )
         return
 
     # ── CANCEL large-order confirmation ───────────────────────────────────────
@@ -575,21 +581,21 @@ async def _command_poll_async() -> None:
     offset     = 0
     authorized = str(cfg.TELEGRAM_CHAT_ID).strip()
 
-    async def _reply(to_chat: str, text: str) -> None:
-        async with bot:
-            await bot.send_message(
-                chat_id                  = to_chat,
-                text                     = text,
-                parse_mode               = ParseMode.HTML,
-                disable_web_page_preview = True,
-            )
+    # _reply uses the plain requests-based sender so it doesn't share the
+    # polling Bot's connection pool, eliminating pool-timeout conflicts.
+    def _reply(to_chat: str, text: str) -> None:
+        m4.send_message(text)   # already targets TELEGRAM_CHAT_ID; ignore to_chat arg
 
     log.info("Telegram command listener started.")
 
-    while True:
+    # Enter Bot context ONCE — not on every loop iteration — to avoid repeatedly
+    # creating/destroying the httpx connection pool (root cause of "Pool timeout"
+    # and "Conflict: terminated by other getUpdates request" errors).
+    await bot.initialize()
+    try:
+      while True:
         try:
-            async with bot:
-                updates = await bot.get_updates(offset=offset, timeout=20)
+            updates = await bot.get_updates(offset=offset, timeout=20)
 
             for update in updates:
                 offset = update.update_id + 1
@@ -616,12 +622,11 @@ async def _command_poll_async() -> None:
 
                 if text.startswith("/status"):
                     reply = tracker.get_status()
-                    async with bot:
-                        await bot.send_message(
-                            chat_id    = chat_id,
-                            text       = reply,
-                            parse_mode = ParseMode.HTML,
-                        )
+                    await bot.send_message(
+                        chat_id    = chat_id,
+                        text       = reply,
+                        parse_mode = ParseMode.HTML,
+                    )
                     log.info("/status replied.")
                 elif text.startswith("/test"):
                     loop = asyncio.get_event_loop()
@@ -636,81 +641,84 @@ async def _command_poll_async() -> None:
                            "❌ MISMATCH — alerts are going to the wrong chat!\n"
                            f"Set TELEGRAM_CHAT_ID=<code>{chat_id}</code> in Railway env vars.")
                     )
-                    async with bot:
-                        await bot.send_message(
-                            chat_id=chat_id, text=reply, parse_mode=ParseMode.HTML,
-                        )
+                    await bot.send_message(
+                        chat_id=chat_id, text=reply, parse_mode=ParseMode.HTML,
+                    )
                     log.info(f"/chatid: incoming={chat_id} configured={authorized}")
                 elif text.startswith("/setmargin"):
                     parts = text.split()
                     if len(parts) < 2:
-                        await _reply(chat_id, "Usage: /setmargin 10")
+                        _reply(chat_id, "Usage: /setmargin 10")
                     else:
                         try:
                             val = float(parts[1])
                             val = max(cfg.MARGIN_MIN_USDT, min(cfg.MARGIN_MAX_USDT, val))
                             _session_margin = val
-                            await _reply(chat_id, f"✅ Margin set to <b>${val:.0f}</b> per trade")
+                            _reply(chat_id, f"✅ Margin set to <b>${val:.0f}</b> per trade")
                             log.info(f"/setmargin → ${val:.0f}")
                         except ValueError:
-                            await _reply(chat_id, "⚠️ Invalid amount. Example: /setmargin 10")
+                            _reply(chat_id, "⚠️ Invalid amount. Example: /setmargin 10")
                 elif text.startswith("/setleverage"):
                     parts = text.split()
                     if len(parts) < 2:
-                        await _reply(chat_id, "Usage: /setleverage 5")
+                        _reply(chat_id, "Usage: /setleverage 5")
                     else:
                         try:
                             val = max(1, min(20, int(parts[1])))
                             _session_leverage = val
-                            await _reply(chat_id, f"✅ Leverage set to <b>{val}x</b>")
+                            _reply(chat_id, f"✅ Leverage set to <b>{val}x</b>")
                             log.info(f"/setleverage → {val}x")
                         except ValueError:
-                            await _reply(chat_id, "⚠️ Invalid value. Example: /setleverage 5")
+                            _reply(chat_id, "⚠️ Invalid value. Example: /setleverage 5")
                 elif text.startswith("/balance"):
                     bal = trader.get_account_balance()
                     if bal is not None:
-                        await _reply(chat_id, f"💰 MEXC Balance: <b>${bal:.2f} USDT</b>")
+                        _reply(chat_id, f"💰 MEXC Balance: <b>${bal:.2f} USDT</b>")
                     else:
-                        await _reply(chat_id, "⚠️ Could not fetch balance. Check API keys.")
+                        _reply(chat_id, "⚠️ Could not fetch balance. Check API keys.")
                     log.info("/balance replied.")
                 elif text.startswith("/coins"):
                     history = tracker.get_scan_history()
-                    await _reply(chat_id, m4.build_coins_message(history))
+                    _reply(chat_id, m4.build_coins_message(history))
                     log.info("/coins replied.")
                 elif text.startswith("/top"):
                     top       = tracker.get_top_results()
                     alert_log = m_log.get_recent_alerts(hours=24)
-                    await _reply(chat_id, m4.build_top_message(top, alert_log=alert_log))
+                    _reply(chat_id, m4.build_top_message(top, alert_log=alert_log))
                     log.info("/top replied.")
                 elif text.startswith("/best"):
                     top = tracker.get_top_results()
-                    await _reply(chat_id, m4.build_best_message(top))
+                    _reply(chat_id, m4.build_best_message(top))
                     log.info("/best replied.")
                 elif text.startswith("/filters"):
-                    await _reply(chat_id, m4.build_filters_message())
+                    _reply(chat_id, m4.build_filters_message())
                     log.info("/filters replied.")
                 elif text.startswith("/explain"):
                     parts = text.split()
                     if len(parts) < 2:
-                        await _reply(chat_id, "Usage: /explain COIN\nExample: /explain POLYX")
+                        _reply(chat_id, "Usage: /explain COIN\nExample: /explain POLYX")
                     else:
                         history = tracker.get_scan_history()
-                        await _reply(chat_id, m4.build_explain_message(parts[1], history))
+                        _reply(chat_id, m4.build_explain_message(parts[1], history))
                     log.info("/explain replied.")
                 elif text.startswith("/recovery"):
-                    await _reply(chat_id, m4.build_recovery_message(m5._last_rb_watchlist))
+                    _reply(chat_id, m4.build_recovery_message(m5._last_rb_watchlist))
                     log.info("/recovery replied.")
                 elif text.startswith("/summary"):
                     stats = tracker.get_daily_summary()
-                    await _reply(chat_id, m4.build_summary_message(stats))
+                    _reply(chat_id, m4.build_summary_message(stats))
                     log.info("/summary replied.")
                 elif text.startswith("/help"):
-                    await _reply(chat_id, m4.build_help_message())
+                    _reply(chat_id, m4.build_help_message())
                     log.info("/help replied.")
 
         except Exception as exc:
+            import traceback as _tb
             log.warning(f"Command poll error (will retry): {exc}")
+            log.debug(_tb.format_exc())
             await asyncio.sleep(10)
+    finally:
+        await bot.shutdown()
 
 
 def _start_command_listener() -> None:

@@ -61,106 +61,149 @@ _pending_signal_orders: dict[str, dict] = {}
 # Core send infrastructure
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _send_async(text: str) -> bool:
-    """Send a single Telegram message asynchronously. Returns True on success."""
-    if not cfg.TELEGRAM_CHAT_ID:
-        log.error("TELEGRAM_CHAT_ID not set — cannot send.")
-        return False
+import requests as _requests
+import traceback as _traceback
+
+_TG_API = "https://api.telegram.org/bot"
+
+# Consecutive-failure throttle: track failures and last Telegram error notification
+_send_fail_count:       int   = 0
+_last_fail_tg_notify:   float = 0.0
+_FAIL_NOTIFY_INTERVAL:  float = 1800.0   # 30 min between Telegram error messages
+_FAIL_NOTIFY_THRESHOLD: int   = 3
+
+
+def _tg_post(endpoint: str, payload: dict, *, log_context: str = "") -> dict | None:
+    """
+    Raw POST to Telegram Bot API. Handles 429 (wait + single retry).
+    Returns the JSON response dict on success, None on failure.
+    Logs "API FAIL: url status=X error=Y" on every failure.
+    """
     if not cfg.TELEGRAM_BOT_TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN not set — cannot send.")
-        return False
-    try:
-        log.debug(f"Sending to chat_id={cfg.TELEGRAM_CHAT_ID!r}")
-        async with Bot(token=cfg.TELEGRAM_BOT_TOKEN) as bot:
-            await bot.send_message(
-                chat_id                  = int(cfg.TELEGRAM_CHAT_ID),
-                text                     = text,
-                parse_mode               = ParseMode.HTML,
-                disable_web_page_preview = True,
-            )
-        return True
-    except Exception as e:
-        log.error(f"Telegram send failed (chat_id={cfg.TELEGRAM_CHAT_ID!r}): {e}")
-        return False
+        log.error("TELEGRAM_BOT_TOKEN not set.")
+        return None
+    url = f"{_TG_API}{cfg.TELEGRAM_BOT_TOKEN}/{endpoint}"
+    for attempt in range(2):
+        try:
+            resp = _requests.post(url, json=payload, timeout=15)
+        except Exception as exc:
+            log.error(f"API FAIL: {endpoint} status=timeout error={exc}")
+            if log_context:
+                log.debug(_traceback.format_exc())
+            return None
+
+        if resp.status_code == 429:
+            retry_after = int((resp.json() or {}).get("parameters", {}).get("retry_after", 60))
+            log.warning(f"API FAIL: {endpoint} status=429 — rate limited. Waiting {retry_after}s then retrying.")
+            import time as _time; _time.sleep(retry_after)
+            continue  # one retry after wait
+
+        if resp.status_code != 200:
+            log.error(f"API FAIL: {endpoint} status={resp.status_code} error={resp.text[:300]}")
+            return None
+
+        return resp.json()
+
+    log.error(f"API FAIL: {endpoint} — all retries exhausted after 429.")
+    return None
 
 
 def send_message(text: str) -> bool:
     """
-    Synchronous entry point — safe to call from any non-async code.
-    Splits messages that exceed Telegram's 4 096-char hard limit,
-    breaking on newline boundaries to keep formatting intact.
+    Send a Telegram message via direct HTTP POST (no asyncio, no connection pool).
+    Splits messages that exceed Telegram's 4 096-char hard limit.
+    Throttles Telegram failure notifications after 3 consecutive failures.
     """
+    global _send_fail_count, _last_fail_tg_notify
+    import time as _time
+
     if not text:
         return False
-
-    MAX = 4000   # conservative limit below Telegram's 4096 to leave room for HTML tags
-
-    if len(text) <= MAX:
-        return asyncio.run(_send_async(text))
-
-    # Build chunks by accumulating lines until we approach the limit
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-
-    for line in text.splitlines(keepends=True):
-        if current_len + len(line) > MAX and current:
-            chunks.append("".join(current))
-            current     = []
-            current_len = 0
-        current.append(line)
-        current_len += len(line)
-
-    if current:
-        chunks.append("".join(current))
-
-    return all(asyncio.run(_send_async(chunk)) for chunk in chunks)
-
-
-async def _send_with_buttons_async(text: str, markup: InlineKeyboardMarkup) -> tuple[bool, int | None]:
-    """Send a message with inline keyboard buttons. Returns (success, message_id)."""
-    if not cfg.TELEGRAM_CHAT_ID or not cfg.TELEGRAM_BOT_TOKEN:
-        log.error("Telegram credentials not set.")
-        return False, None
-    try:
-        async with Bot(token=cfg.TELEGRAM_BOT_TOKEN) as bot:
-            msg = await bot.send_message(
-                chat_id                  = int(cfg.TELEGRAM_CHAT_ID),
-                text                     = text,
-                parse_mode               = ParseMode.HTML,
-                reply_markup             = markup,
-                disable_web_page_preview = True,
-            )
-        return True, msg.message_id
-    except Exception as e:
-        log.error(f"Telegram send-with-buttons failed: {e}")
-        return False, None
-
-
-async def _edit_message_async(chat_id: int, message_id: int, text: str) -> bool:
-    """Edit an existing message text (removes inline keyboard)."""
-    try:
-        async with Bot(token=cfg.TELEGRAM_BOT_TOKEN) as bot:
-            await bot.edit_message_text(
-                chat_id    = chat_id,
-                message_id = message_id,
-                text       = text,
-                parse_mode = ParseMode.HTML,
-            )
-        return True
-    except Exception as e:
-        log.warning(f"edit_message failed: {e}")
+    if not cfg.TELEGRAM_CHAT_ID:
+        log.error("TELEGRAM_CHAT_ID not set — cannot send.")
         return False
 
+    MAX = 4000
+    chunks: list[str] = []
+    if len(text) <= MAX:
+        chunks = [text]
+    else:
+        current: list[str] = []
+        current_len = 0
+        for line in text.splitlines(keepends=True):
+            if current_len + len(line) > MAX and current:
+                chunks.append("".join(current))
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += len(line)
+        if current:
+            chunks.append("".join(current))
 
-def send_message_with_buttons(text: str, markup: InlineKeyboardMarkup) -> tuple[bool, int | None]:
-    """Synchronous wrapper — safe to call from scheduler jobs."""
-    return asyncio.run(_send_with_buttons_async(text, markup))
+    ok = True
+    for chunk in chunks:
+        payload = {
+            "chat_id":                  cfg.TELEGRAM_CHAT_ID,
+            "text":                     chunk,
+            "parse_mode":               "HTML",
+            "disable_web_page_preview": True,
+        }
+        result = _tg_post("sendMessage", payload)
+        if result is None:
+            ok = False
+            _send_fail_count += 1
+            log.error(f"Telegram send failed ({_send_fail_count} consecutive failure(s)).")
+            # Only emit a Telegram error notification if under threshold or interval elapsed
+            now = _time.time()
+            if (_send_fail_count == _FAIL_NOTIFY_THRESHOLD or
+                    (now - _last_fail_tg_notify) >= _FAIL_NOTIFY_INTERVAL):
+                log.warning("Suppressing further Telegram failure notifications for 30 min.")
+                _last_fail_tg_notify = now
+        else:
+            _send_fail_count = 0
+
+    return ok
+
+
+def send_message_with_buttons(text: str, markup: "InlineKeyboardMarkup") -> "tuple[bool, int | None]":
+    """
+    Send a Telegram message with inline keyboard via direct HTTP POST.
+    Returns (success, message_id).
+    """
+    if not cfg.TELEGRAM_CHAT_ID:
+        return False, None
+
+    # Serialise InlineKeyboardMarkup to the Telegram JSON format
+    keyboard_rows = []
+    for row in markup.inline_keyboard:
+        keyboard_rows.append([
+            {"text": btn.text, "callback_data": btn.callback_data}
+            for btn in row
+        ])
+
+    payload = {
+        "chat_id":                  cfg.TELEGRAM_CHAT_ID,
+        "text":                     text,
+        "parse_mode":               "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup":             {"inline_keyboard": keyboard_rows},
+    }
+    result = _tg_post("sendMessage", payload)
+    if result is None:
+        return False, None
+    msg_id = (result.get("result") or {}).get("message_id")
+    return True, msg_id
 
 
 def edit_signal_message(chat_id: int, message_id: int, text: str) -> bool:
-    """Synchronous wrapper for editing a previously sent signal message."""
-    return asyncio.run(_edit_message_async(chat_id, message_id, text))
+    """Edit an existing Telegram message text via direct HTTP POST."""
+    payload = {
+        "chat_id":    chat_id,
+        "message_id": message_id,
+        "text":       text,
+        "parse_mode": "HTML",
+    }
+    return _tg_post("editMessageText", payload) is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
