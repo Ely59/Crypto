@@ -46,7 +46,7 @@ log = get_logger("main")
 _BERLIN_TZ = "Europe/Berlin"
 
 # ── Maintenance mode — set True to pause all jobs while keeping Telegram alive ─
-MAINTENANCE_MODE: bool = True
+MAINTENANCE_MODE: bool = False
 
 # ── Session trading settings (overridable via /setmargin and /setleverage) ────
 _session_margin:   float = cfg.DEFAULT_MARGIN_USDT
@@ -844,8 +844,7 @@ def start_scheduler():
     _start_command_listener()
 
     if MAINTENANCE_MODE:
-        scheduler.pause()   # freezes all 9 jobs; scheduler loop still blocks (keeps process alive)
-        log.warning("MAINTENANCE MODE: all scheduler jobs paused.")
+        log.warning("MAINTENANCE MODE: all scheduler jobs will be paused after start.")
         m4.send_message("🔧 Bot in maintenance mode. Back soon.")
         print("All jobs paused successfully")
     else:
@@ -854,7 +853,7 @@ def start_scheduler():
 
     log.info("Press Ctrl+C to stop.")
     try:
-        scheduler.start()
+        scheduler.start()   # blocks here — must come before pause()
     except (KeyboardInterrupt, SystemExit):
         log.info("Scheduler stopped.")
 
