@@ -1892,6 +1892,9 @@ def scan() -> list[MomentumResult]:
         if tech.h4_method_b and not tech.h4_ema_ok and not tech.h4_transitioning:
             total = max(0, total - 3)
 
+        # Hard cap: score never exceeds 100
+        total = min(100, total)
+
         # Recommendation classification
         if total >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:
             recommendation = "STRONG ENTRY"

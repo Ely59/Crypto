@@ -1450,13 +1450,13 @@ def build_momentum_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_momentum_alert(coin) -> bool:
-    """Send a Module 5 momentum alert (≥65/100) to Telegram."""
+def send_momentum_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Module 5 momentum alert (≥65/100) to Telegram with inline buttons."""
     log.info(
         f"Sending {coin.recommendation} alert for "
         f"{coin.symbol} ({coin.change_1h:+.2f}% 1h, {coin.total_score}/100)…"
     )
-    return send_message(build_momentum_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_momentum_cooling_alert(coin) -> str:
@@ -1572,11 +1572,11 @@ def build_leg_continuation_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_leg_continuation_alert(coin) -> bool:
-    """Send a Leg Continuation alert to Telegram."""
+def send_leg_continuation_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Leg Continuation alert to Telegram with inline buttons."""
     leg_num = getattr(coin, 'leg_number', 2)
     log.info(f"Sending LEG {leg_num} CONTINUATION alert for {coin.symbol}…")
-    return send_message(build_leg_continuation_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_volume_spike_alert(coin) -> str:
@@ -1584,10 +1584,10 @@ def build_volume_spike_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_volume_spike_alert(coin) -> bool:
-    """Send a Module 5 Volume Spike pre-signal alert to Telegram."""
+def send_volume_spike_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Module 5 Volume Spike pre-signal alert to Telegram with inline buttons."""
     log.info(f"Sending VOLUME SPIKE alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
-    return send_message(build_volume_spike_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_recovery_alert(coin) -> str:
@@ -1595,13 +1595,13 @@ def build_recovery_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_recovery_alert(coin) -> bool:
-    """Send a Module 5 Recovery Bounce alert to Telegram."""
+def send_recovery_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Module 5 Recovery Bounce alert to Telegram with inline buttons."""
     log.info(
         f"Sending RECOVERY alert for {coin.symbol} "
         f"({coin.change_1h:+.2f}% 1h, pulled back from {coin.tech.h24_high if coin.tech else '?'})…"
     )
-    return send_message(build_recovery_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_golden_cross_alert(coin) -> str:
@@ -1609,10 +1609,10 @@ def build_golden_cross_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_golden_cross_alert(coin) -> bool:
-    """Send a Module 5 Golden Cross early-entry alert to Telegram."""
+def send_golden_cross_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Module 5 Golden Cross early-entry alert to Telegram with inline buttons."""
     log.info(f"Sending GOLDEN CROSS alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
-    return send_message(build_golden_cross_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_pbw_alert(coin) -> str:
@@ -1620,10 +1620,10 @@ def build_pbw_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_pbw_alert(coin) -> bool:
-    """Send a Module 5 Pre-Breakout Watch alert to Telegram."""
+def send_pbw_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Module 5 Pre-Breakout Watch alert to Telegram with inline buttons."""
     log.info(f"Sending PRE-BREAKOUT alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
-    return send_message(build_pbw_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_staircase_alert(coin) -> str:
@@ -1631,10 +1631,10 @@ def build_staircase_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_staircase_alert(coin) -> bool:
-    """Send a Module 5 Staircase Continuation alert to Telegram."""
+def send_staircase_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Module 5 Staircase Continuation alert to Telegram with inline buttons."""
     log.info(f"Sending STAIRCASE alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
-    return send_message(build_staircase_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_squeeze_alert(coin) -> str:
@@ -1642,13 +1642,13 @@ def build_squeeze_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_squeeze_alert(coin) -> bool:
-    """Send a BB-Squeeze Breakout alert to Telegram."""
+def send_squeeze_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a BB-Squeeze Breakout alert to Telegram with inline buttons."""
     log.info(
         f"Sending SQUEEZE BREAKOUT alert for {coin.symbol} "
         f"({coin.change_1h:+.2f}% 1h, score {coin.total_score})…"
     )
-    return send_message(build_squeeze_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_speed_alert(coin) -> str:
@@ -1656,10 +1656,10 @@ def build_speed_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_speed_alert(coin) -> bool:
-    """Send a Speed Alert to Telegram."""
+def send_speed_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send a Speed Alert to Telegram with inline buttons."""
     log.info(f"Sending SPEED ALERT for {coin.symbol} ({coin.change_1h:+.2f}% 1h)…")
-    return send_message(build_speed_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_early_gc_alert(coin) -> str:
@@ -1667,10 +1667,10 @@ def build_early_gc_alert(coin) -> str:
     return build_unified_alert(coin)
 
 
-def send_early_gc_alert(coin) -> bool:
-    """Send an Early GC (5m EMA cross) alert to Telegram."""
+def send_early_gc_alert(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send an Early GC (5m EMA cross) alert to Telegram with inline buttons."""
     log.info(f"Sending EARLY GC alert for {coin.symbol} ({coin.change_1h:+.2f}% 1h, score {coin.total_score})…")
-    return send_message(build_early_gc_alert(coin))
+    return send_alert_with_buttons(coin, margin, leverage)
 
 
 def build_weekly_hitrate_report(stats: dict) -> str:
@@ -2059,12 +2059,102 @@ def send_radar_alert(info: dict) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIGNAL alert (Part B) — with Telegram InlineKeyboard buttons
+# Shared button builder — used by ALL alert types that have Breakout/Pullback
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _short_id() -> str:
     """Generate a short unique ID for pending signal order storage."""
     return f"{int(time.time()) % 1_000_000:06d}"
+
+
+def _build_coin_keyboard(coin, margin: float, leverage: int) -> "InlineKeyboardMarkup":
+    """
+    Register breakout + pullback pending orders for a MomentumResult coin and
+    return an InlineKeyboardMarkup with the three standard buttons.
+    Called by every send_* function that has entry_price / stop_loss data.
+    """
+    sym          = coin.symbol
+    mexc_sym     = getattr(coin, "mexc_symbol", f"{sym}_USDT")
+    sl_factor    = coin.stop_loss / coin.entry_price if coin.entry_price > 0 else 0.94
+    tp1_factor   = coin.tp1 / coin.entry_price if coin.entry_price > 0 else 1.10
+    tp2_factor   = coin.tp2 / coin.entry_price if coin.entry_price > 0 else 1.20
+
+    bk_price = coin.entry_price
+    bk_sl    = round(bk_price * sl_factor,  8)
+    bk_tp1   = round(bk_price * tp1_factor, 8)
+    bk_tp2   = round(bk_price * tp2_factor, 8)
+
+    # Pullback = 5m EMA20 if available and below entry, else entry × 0.97
+    t = coin.tech
+    pb_ema20 = (t.m5_ema20 if (t and t.m5_ema20 > 0 and t.m5_ema20 < bk_price * 0.999) else 0.0)
+    pb_price = pb_ema20 if pb_ema20 > 0 else round(bk_price * 0.97, 8)
+    pb_sl    = round(pb_price * sl_factor,  8)
+    pb_tp1   = round(pb_price * tp1_factor, 8)
+    pb_tp2   = round(pb_price * tp2_factor, 8)
+
+    bk_id = _short_id()
+    time.sleep(0.001)
+    pb_id = _short_id() + "p"
+
+    _pending_signal_orders[bk_id] = {
+        "order_type": "breakout",
+        "symbol":     sym,
+        "mexc_symbol": mexc_sym,
+        "side":       "BUY",
+        "price":      bk_price,
+        "sl":         bk_sl,
+        "tp1":        bk_tp1,
+        "tp2":        bk_tp2,
+        "margin":     margin,
+        "leverage":   leverage,
+        "created_at": time.time(),
+    }
+    _pending_signal_orders[pb_id] = {
+        "order_type": "pullback",
+        "symbol":     sym,
+        "mexc_symbol": mexc_sym,
+        "side":       "BUY",
+        "price":      pb_price,
+        "sl":         pb_sl,
+        "tp1":        pb_tp1,
+        "tp2":        pb_tp2,
+        "margin":     margin,
+        "leverage":   leverage,
+        "created_at": time.time(),
+    }
+
+    # Expire pending orders older than 24 h
+    stale = time.time() - 86_400
+    for k in [k for k, v in list(_pending_signal_orders.items()) if v.get("created_at", 0) < stale]:
+        del _pending_signal_orders[k]
+
+    fd = _fmt_price_dollar
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"✅ BREAKOUT {fd(bk_price)}",
+                callback_data=json.dumps({"a": "o", "id": bk_id}, separators=(",", ":")),
+            ),
+            InlineKeyboardButton(
+                f"✅ PULLBACK {fd(pb_price)}",
+                callback_data=json.dumps({"a": "o", "id": pb_id}, separators=(",", ":")),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Skip",
+                callback_data=json.dumps({"a": "s", "sym": sym}, separators=(",", ":")),
+            ),
+        ],
+    ])
+
+
+def send_alert_with_buttons(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+    """Send any MomentumResult as a unified alert WITH inline keyboard buttons."""
+    text     = build_unified_alert(coin)
+    keyboard = _build_coin_keyboard(coin, margin, leverage)
+    ok, _    = send_message_with_buttons(text, keyboard)
+    return ok
 
 
 def build_signal_text(info: dict) -> str:

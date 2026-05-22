@@ -246,28 +246,30 @@ def run_momentum_scan():
         log.info("Momentum scan: no new alerts this cycle.")
         return
 
+    mg = _session_margin
+    lv = _session_leverage
     sent = 0
     for coin in results:
         if coin.recommendation == "COOLING_DOWN":
             m4.send_momentum_cooling_alert(coin)
         elif coin.recommendation == "GOLDEN CROSS":
-            m4.send_golden_cross_alert(coin)
+            m4.send_golden_cross_alert(coin, mg, lv)
         elif coin.recommendation == "VOLUME SPIKE":
-            m4.send_volume_spike_alert(coin)
+            m4.send_volume_spike_alert(coin, mg, lv)
         elif coin.recommendation == "RECOVERY":
-            m4.send_recovery_alert(coin)
+            m4.send_recovery_alert(coin, mg, lv)
         elif coin.recommendation == "PRE-BREAKOUT":
-            m4.send_pbw_alert(coin)
+            m4.send_pbw_alert(coin, mg, lv)
         elif coin.recommendation == "STAIRCASE":
-            m4.send_staircase_alert(coin)
+            m4.send_staircase_alert(coin, mg, lv)
         elif coin.recommendation == "SQUEEZE":
-            m4.send_squeeze_alert(coin)
+            m4.send_squeeze_alert(coin, mg, lv)
         elif coin.recommendation == "SPEED ALERT":
-            m4.send_speed_alert(coin)
+            m4.send_speed_alert(coin, mg, lv)
         elif coin.recommendation == "EARLY GC":
-            m4.send_early_gc_alert(coin)
+            m4.send_early_gc_alert(coin, mg, lv)
         else:
-            m4.send_momentum_alert(coin)
+            m4.send_momentum_alert(coin, mg, lv)
         m_log.log_alert(coin, coin.recommendation)
         sent += 1
 
@@ -291,8 +293,10 @@ def run_tier2_scan():
         log.debug("Tier 2: no new alerts.")
         return
 
+    mg = _session_margin
+    lv = _session_leverage
     for coin in results:
-        m4.send_momentum_alert(coin)
+        m4.send_momentum_alert(coin, mg, lv)
         m_log.log_alert(coin, coin.recommendation)
 
     log.info(f"Tier 2 scan: {len(results)} alert(s) sent.")
@@ -315,8 +319,10 @@ def run_tier3_scan():
         log.debug("Tier 3: no leg continuations detected.")
         return
 
+    mg = _session_margin
+    lv = _session_leverage
     for coin in results:
-        m4.send_leg_continuation_alert(coin)
+        m4.send_leg_continuation_alert(coin, mg, lv)
         m_log.log_alert(coin, coin.recommendation)
 
     log.info(f"Tier 3 scan: {len(results)} leg continuation(s) sent.")
