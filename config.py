@@ -298,14 +298,18 @@ MOMENTUM_RB_SL_PCT       = 5.0    # tight SL — old peak is overhead resistance
 # ─── FIX 4: KDJ as warning + dead zone + ATH distance bonus ──────────────────
 MOMENTUM_DEAD_VOL_PCT    = 0.15   # vol < 15% of MA10 = dead volume
 MOMENTUM_DEAD_1H_MAX     = 3.0    # block only if dead vol AND 1H < 3% (low momentum confirmed)
-MOMENTUM_ATH_DIST_L1     = 80.0   # > 80% below real ATH → +3 pts (high upside)
-MOMENTUM_ATH_DIST_L2     = 90.0   # > 90% below real ATH → +5 pts (massive upside)
-MOMENTUM_ATH_DIST_L1_PTS = 3
-MOMENTUM_ATH_DIST_L2_PTS = 5
-MOMENTUM_ATH_DIST_P1     = 60.0   # 40–60% below ATH → -3 pts (limited upside)
-MOMENTUM_ATH_DIST_P2     = 40.0   # < 40% below ATH → -8 pts (near ATH, low ROI)
-MOMENTUM_ATH_DIST_P1_PTS = -3
-MOMENTUM_ATH_DIST_P2_PTS = -8
+MOMENTUM_ATH_DIST_L2          = 90.0   # > 90% below ATH → +15 pts (massive upside)
+MOMENTUM_ATH_DIST_L1          = 80.0   # 80–90% below ATH → +10 pts (high upside)
+MOMENTUM_ATH_DIST_L3          = 60.0   # 60–80% below ATH → +3 pts
+MOMENTUM_ATH_DIST_P1          = 40.0   # 40–60% below ATH → 0 pts (neutral)
+MOMENTUM_ATH_DIST_P2          = 20.0   # 20–40% below ATH → -5 pts (limited upside)
+MOMENTUM_ATH_DIST_P3          = 10.0   # 10–20% below ATH → -12 pts (near ATH)
+MOMENTUM_ATH_DIST_HARD_BLOCK  = 10.0   # < 10% below ATH → hard block, no alert
+MOMENTUM_ATH_DIST_L2_PTS      = 15
+MOMENTUM_ATH_DIST_L1_PTS      = 10
+MOMENTUM_ATH_DIST_L3_PTS      = 3
+MOMENTUM_ATH_DIST_P2_PTS      = -5
+MOMENTUM_ATH_DIST_P3_PTS      = -12
 
 # ─── Pre-Breakout Watch signal (FIX 5) ───────────────────────────────────────
 MOMENTUM_PBW_1H_MIN            = 1.0    # min 1H gain for PBW candidates

@@ -499,6 +499,10 @@ _active_watch: set[str] = set()           # mexc_symbols with 5m EMA cross / spi
 # Tier 3: coins that received an alert (for leg continuation tracking)
 _alert_watchlist: dict[str, dict] = {}    # symbol → {leg_high, entry_price, signal_type, leg_number, alert_time}
 
+# CMC data cache — populated by Tier 1 scan so Tier 2 can show real name/mcap/circ
+# symbol → (name, matched_tags, mcap, vol_24h, fdv, fdv_ratio, circ_pct)
+_cmc_data_cache: dict[str, tuple] = {}
+
 # Timestamps for /status reporting
 _tier1_last_run: float = 0.0
 _tier2_last_run: float = 0.0
@@ -1331,16 +1335,18 @@ def _apply_5m_to_tech(tech: TechResult, m5: "dict | None") -> None:
 
 
 def _ath_score(dist_pct: float) -> int:
-    """Bonus (+) or penalty (-) based on real ATH distance."""
-    if dist_pct > cfg.MOMENTUM_ATH_DIST_L2:
-        return cfg.MOMENTUM_ATH_DIST_L2_PTS   # >90% → +5
-    if dist_pct > cfg.MOMENTUM_ATH_DIST_L1:
-        return cfg.MOMENTUM_ATH_DIST_L1_PTS   # 80-90% → +3
-    if dist_pct > cfg.MOMENTUM_ATH_DIST_P1:
-        return 0                               # 60-80% → neutral
-    if dist_pct > cfg.MOMENTUM_ATH_DIST_P2:
-        return cfg.MOMENTUM_ATH_DIST_P1_PTS   # 40-60% → -3
-    return cfg.MOMENTUM_ATH_DIST_P2_PTS        # < 40% → -8
+    """Bonus (+) or penalty (-) based on real ATH distance. Hard block handled by caller."""
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_L2:   # > 90% → +15
+        return cfg.MOMENTUM_ATH_DIST_L2_PTS
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_L1:   # 80–90% → +10
+        return cfg.MOMENTUM_ATH_DIST_L1_PTS
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_L3:   # 60–80% → +3
+        return cfg.MOMENTUM_ATH_DIST_L3_PTS
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_P1:   # 40–60% → 0
+        return 0
+    if dist_pct > cfg.MOMENTUM_ATH_DIST_P2:   # 20–40% → -5
+        return cfg.MOMENTUM_ATH_DIST_P2_PTS
+    return cfg.MOMENTUM_ATH_DIST_P3_PTS        # ≤ 20% → -12
 
 
 def _lookup_ath(ath_map: dict, symbol: str, price: float,
@@ -1661,6 +1667,13 @@ def scan() -> list[MomentumResult]:
         )
         candidates.append(entry_tuple)
 
+    # Cache CMC data keyed by symbol so Tier 2 can show real name/mcap/circ
+    global _cmc_data_cache
+    _cmc_data_cache = {
+        sym: (n, tags, mc, vol, fv, fr, cp)
+        for sym, n, tags, _, _, _, _, mc, vol, fv, fr, cp in candidates
+    }
+
     # Stage 1 filter breakdown — logged every scan for pipeline analysis
     log.info(
         f"Stage 1 filter stats: "
@@ -1858,6 +1871,14 @@ def scan() -> list[MomentumResult]:
         # ATH distance — real ATH from CoinGecko (fallback to 16D candle peak)
         real_ath_dist, real_ath_price, real_ath_date = _lookup_ath(
             _ath_map, symbol, price, tech.ath_dist_pct)
+
+        # Hard block: coin within 10% of ATH — risk/reward too poor
+        if real_ath_dist < cfg.MOMENTUM_ATH_DIST_HARD_BLOCK:
+            log.info(f"  ATH BLOCK  {symbol}: only {real_ath_dist:.1f}% below ATH")
+            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "ATH_BLOCK",
+                f"Only {real_ath_dist:.1f}% below ATH — hard block", tech.vol_pct, tech.h4_kdj_j))
+            continue
+
         ath_pts = _ath_score(real_ath_dist)
 
         # Total score
@@ -1879,41 +1900,24 @@ def scan() -> list[MomentumResult]:
             recommendation = "WATCH"
             rec_emoji      = "🟡"
         else:
-            # Promote MONITOR-level coins that show early-move characteristics
-            is_early = (
-                total >= cfg.MOMENTUM_TOTAL_MONITOR and
-                change_1h < cfg.MOMENTUM_EARLY_1H_MAX and
-                cfg.MOMENTUM_EARLY_15M_MIN <= tech.m15_change <= cfg.MOMENTUM_EARLY_15M_MAX and
-                tech.vol_pct >= cfg.MOMENTUM_VOL_SPIKE_MIN * 100
-            )
-            if is_early:
-                recommendation = "EARLY SIGNAL"
-                rec_emoji      = "🔍"
-            elif total >= cfg.MOMENTUM_TOTAL_MONITOR:
+            if total >= cfg.MOMENTUM_TOTAL_MONITOR:
                 log.info(f"  MONITOR  {symbol}: {total}/100 — logged only, no alert")
                 _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, total, "MONITOR", f"Score {total}/100 — below alert threshold ({cfg.MOMENTUM_TOTAL_WATCH})", tech.vol_pct, tech.h4_kdj_j))
-                continue
             else:
                 log.debug(f"  SKIP     {symbol}: {total}/100 < {cfg.MOMENTUM_TOTAL_MONITOR}")
                 _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, total, "BELOW_THRESHOLD", f"Score {total}/100 — too low", tech.vol_pct, tech.h4_kdj_j))
-                continue
+            continue
 
         # 5m soft gate: downgrade STRONG → WATCH if overheated
         if recommendation == "STRONG ENTRY" and tech.m5_note.startswith("⏳"):
             recommendation = "WATCH"
             rec_emoji      = "🟡"
 
-        # SL parameters — tighter for EARLY SIGNAL (−4% vs standard −6%)
-        if recommendation == "EARLY SIGNAL":
-            coin_sl_factor = 1.0 - cfg.MOMENTUM_EARLY_SL_PCT / 100.0
-            coin_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_EARLY_SL_PCT / 100.0, 2)
-            coin_rr_str    = f"1:{_rwd_tp1 / coin_risk_usd:.2f}"
-            coin_sl_pct    = cfg.MOMENTUM_EARLY_SL_PCT
-        else:
-            coin_sl_factor = _sl_factor
-            coin_risk_usd  = _risk_usd
-            coin_rr_str    = _rr_str
-            coin_sl_pct    = cfg.MOMENTUM_SL_PCT
+        # SL parameters — standard for all remaining recommendations
+        coin_sl_factor = _sl_factor
+        coin_risk_usd  = _risk_usd
+        coin_rr_str    = _rr_str
+        coin_sl_pct    = cfg.MOMENTUM_SL_PCT
 
         # Risk warnings
         warnings = _generate_warnings(tech, change_1h, circ_pct, fdv_ratio,
@@ -1921,9 +1925,8 @@ def scan() -> list[MomentumResult]:
                                        is_micro_cap=(symbol in _micro_cap_set),
                                        mcap=mcap)
 
-        early_note = f"  [15m {tech.m15_change:+.1f}%]" if recommendation == "EARLY SIGNAL" else ""
         log.info(
-            f"  {rec_emoji} {recommendation}  {symbol}  {total}/100{early_note}  "
+            f"  {rec_emoji} {recommendation}  {symbol}  {total}/100  "
             f"[tech {tech.score}+fund {fund.total}]  "
             f"[ema {tech.m15_ema_pts}+px {tech.m15_price_pts}+"
             f"rsi {tech.m15_rsi6_pts}+kdj {tech.m15_kdj_pts}+"
@@ -2824,7 +2827,7 @@ def scan() -> list[MomentumResult]:
     _DEDUP_PRIORITY = {
         "SQUEEZE": 8, "STRONG ENTRY": 7, "WATCH": 6, "RECOVERY": 5,
         "GOLDEN CROSS": 4, "STAIRCASE": 4, "VOLUME SPIKE": 3,
-        "PRE-BREAKOUT": 3, "SPEED ALERT": 3, "EARLY SIGNAL": 2,
+        "PRE-BREAKOUT": 3, "SPEED ALERT": 3,
         "EARLY GC": 2, "COOLING_DOWN": 1,
     }
     _all_this_scan = (new_alerts + cooling_alerts + gc_alerts + vs_alerts +
@@ -2869,7 +2872,6 @@ def scan() -> list[MomentumResult]:
 
     strong  = sum(r.recommendation == "STRONG ENTRY" for r in new_alerts)
     watch   = sum(r.recommendation == "WATCH"        for r in new_alerts)
-    early   = sum(r.recommendation == "EARLY SIGNAL" for r in new_alerts)
     gc      = len(gc_alerts)
     vs      = len(vs_alerts)
     rb      = len(rb_alerts)
@@ -2883,7 +2885,7 @@ def scan() -> list[MomentumResult]:
         f"Scan done — {len(candidates)} M1–M7, "
         f"{macro_blocked_count} macro-blocked, "
         f"{len(scored)} scored ≥{cfg.MOMENTUM_TOTAL_WATCH}, "
-        f"{strong} STRONG + {watch} WATCH + {early} EARLY + "
+        f"{strong} STRONG + {watch} WATCH + "
         f"{gc} GC + {vs} VS + {rb} RB + {pbw} PBW + {sc_n} SC + {sq_n} SQ + "
         f"{sp_n} SPEED + {egc_n} EARLY_GC + {cooling} COOLING alerts."
     )
@@ -2946,31 +2948,38 @@ def scan_tier2() -> list:
         if not (tech.h4_ema_ok or tech.h4_method_b or h4_trans_ok):
             continue
 
-        # Simple scoring for Tier 2 (no fundamental data available without CMC)
+        # Simple scoring for Tier 2 (fundamental data pulled from CMC cache)
         tier2_score = tech.score + (5 if tech.h4_ema_ok else 0) + (3 if tech.h4_method_b else 0)
 
-        if tier2_score < 40:
+        if tier2_score < 55:
             continue
 
-        # Emit a WATCH result if score is meaningful
-        rec     = "WATCH" if tier2_score >= 55 else "EARLY SIGNAL"
-        rec_em  = "🟡" if rec == "WATCH" else "🔍"
         decimals = _price_decimals(price)
         _ath_dist, _ath_px, _ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
-        log.info(f"  Tier2 ✓  {symbol}  score {tier2_score}  → {rec}")
+        # Pull real CMC data from cache so name/mcap/circ show correctly in alert
+        cached = _cmc_data_cache.get(symbol)
+        if cached:
+            t2_name, t2_tags, t2_mcap, t2_vol, t2_fdv, t2_fdr, t2_circ = cached
+        else:
+            t2_name, t2_tags, t2_mcap, t2_vol, t2_fdv, t2_fdr, t2_circ = (
+                symbol, [], 0.0, 0.0, 0.0, 0.0, 0.0
+            )
+
+        log.info(f"  Tier2 ✓  {symbol}  score {tier2_score}  → WATCH  MCap ${t2_mcap/1e6:.0f}M")
         _mark_alerted(symbol)
-        _mark_global_alerted(symbol, rec, price)
-        _add_to_watchlist(symbol, price, rec)
+        _mark_global_alerted(symbol, "WATCH", price)
+        _add_to_watchlist(symbol, price, "WATCH")
 
         results.append(MomentumResult(
-            symbol=symbol, name=symbol, price=round(price, 8),
+            symbol=symbol, name=t2_name, price=round(price, 8),
             change_1h=0.0, change_24h=0.0,
-            market_cap=0.0, volume_24h=0.0, fdv=0.0,
-            fdv_mcap_ratio=0.0, circ_supply_pct=0.0,
+            market_cap=t2_mcap, volume_24h=t2_vol, fdv=t2_fdv,
+            fdv_mcap_ratio=round(t2_fdr, 2), circ_supply_pct=round(t2_circ, 1),
+            matched_tags=t2_tags,
             mexc_symbol=mexc_symbol,
             tech=tech, total_score=tier2_score,
-            recommendation=rec, rec_emoji=rec_em,
+            recommendation="WATCH", rec_emoji="🟡",
             warnings=["Tier 2 rescan — verify chart before entry"],
             entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), decimals),
             stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SL_PCT / 100), decimals),

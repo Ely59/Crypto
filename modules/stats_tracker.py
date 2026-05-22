@@ -38,7 +38,7 @@ class DailyStats:
     macro_blocked:  int        = 0   # cumulative 4H macro gate rejections
     entry_alerts:   int        = 0   # STRONG ENTRY alerts sent
     watch_alerts:   int        = 0   # WATCH alerts sent
-    early_alerts:   int        = 0   # EARLY SIGNAL alerts sent
+    early_alerts:   int        = 0   # (unused — EARLY SIGNAL removed)
     gc_alerts:      int        = 0   # GOLDEN CROSS alerts sent
     vs_alerts:      int        = 0   # VOLUME SPIKE pre-signal alerts sent
     rb_alerts:      int        = 0   # RECOVERY BOUNCE alerts sent
@@ -130,7 +130,7 @@ class StatsTracker:
                     s.entry_alerts += 1
                 elif rec == "WATCH":
                     s.watch_alerts += 1
-                elif rec == "EARLY SIGNAL":
+                elif rec == "EARLY SIGNAL":  # legacy — no longer emitted
                     s.early_alerts += 1
                 elif rec == "GOLDEN CROSS":
                     s.gc_alerts += 1
@@ -155,7 +155,7 @@ class StatsTracker:
                 elif rec == "SIGNAL":
                     s.signal_alerts += 1
 
-                _no_score = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "SPEED ALERT", "EARLY GC"}
+                _no_score = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "SPEED ALERT", "EARLY GC"}
 
                 # Track best total score (signal-only types have no score)
                 if rec not in _no_score and r.total_score > s.best_score:
@@ -200,7 +200,7 @@ class StatsTracker:
             self._scan_history.append(snap)
 
             # Today's top scored coins for /top and /best commands
-            _no_score_recs = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "EARLY GC"}
+            _no_score_recs = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "EARLY GC"}
             for r in results:
                 if r.recommendation not in _no_score_recs:
                     s.top_results.append(r)

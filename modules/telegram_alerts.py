@@ -443,10 +443,13 @@ def build_unified_alert(coin) -> str:
         sector = category_label(coin)
     except Exception:
         tags   = getattr(coin, 'matched_tags', None) or []
-        sector = tags[0].replace("-", " ").title() if tags else "Crypto"
+        sector = tags[0].replace("-", " ").title() if tags else ""
+    # Fallback: use coin name from CMC rather than "Unknown"
+    if not sector or sector == "Unknown":
+        sector = getattr(coin, 'name', '') or coin.symbol
 
     # ── Line 1: Header ────────────────────────────────────────────────────────
-    _NO_SCORE_RECS = {"COOLING_DOWN", "EARLY SIGNAL", "GOLDEN CROSS", "VOLUME SPIKE",
+    _NO_SCORE_RECS = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE",
                       "RECOVERY", "SPEED ALERT", "EARLY GC"}
     has_score = rec not in _NO_SCORE_RECS and coin.total_score > 0
     if has_score:
@@ -518,8 +521,9 @@ def build_unified_alert(coin) -> str:
     # ── Line 13: Metadata ─────────────────────────────────────────────────────
     ath_dist = getattr(coin, 'ath_dist_pct', 0.0)
     circ_pct = getattr(coin, 'circ_supply_pct', 0.0)
-    mcap_str = _vol_human(coin.market_cap) if coin.market_cap > 0 else "—"
-    meta_line = f"MCap {mcap_str} | ATH -{ath_dist:.0f}% | Circ {circ_pct:.0f}%"
+    mcap_str = _vol_human(coin.market_cap) if coin.market_cap > 0 else "N/A"
+    circ_str = f"{circ_pct:.0f}%" if circ_pct > 0 else "N/A"
+    meta_line = f"MCap {mcap_str} | ATH -{ath_dist:.0f}% | Circ {circ_str}"
 
     mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
 
@@ -1442,7 +1446,7 @@ def send_entry_alert(entry) -> bool:
 
 
 def build_momentum_alert(coin) -> str:
-    """STRONG ENTRY / WATCH / EARLY SIGNAL alert — unified 15-line format."""
+    """STRONG ENTRY / WATCH alert — unified 15-line format."""
     return build_unified_alert(coin)
 
 
@@ -1689,7 +1693,7 @@ def build_weekly_hitrate_report(stats: dict) -> str:
         "RECOVERY":      "♻️ Recovery Bounce",
         "STRONG ENTRY":  "🟢 Strong Entry",
         "WATCH":         "🟡 Watch",
-        "EARLY SIGNAL":  "🔍 Early Signal",
+        "SIGNAL":        "🔍 Signal",
         "SQUEEZE":       "💥 BB-Squeeze",
         "SPEED ALERT":   "⚡ Speed Alert",
         "EARLY GC":      "⚡ Early GC",
@@ -1804,7 +1808,7 @@ def build_coins_message(scan_history: list) -> str:
         return "No scans recorded yet today. Try again after the next scan (:02/:17/:32/:47 UTC)."
 
     lines = ["📋 <b>RECENT SCAN RESULTS</b>", ""]
-    _no_score = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY", "EARLY SIGNAL"}
+    _no_score = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE", "RECOVERY"}
     for snap in reversed(scan_history):  # most recent first
         lines.append(f"<b>🕐 {snap.timestamp}</b>")
         if not snap.results:
