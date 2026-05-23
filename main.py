@@ -711,6 +711,20 @@ async def _command_poll_async() -> None:
                     stats = tracker.get_daily_summary()
                     _reply(chat_id, m4.build_summary_message(stats))
                     log.info("/summary replied.")
+                elif text.startswith("/passed"):
+                    stats = tracker.get_daily_summary()
+                    _reply(chat_id, m4.build_passed_message(m5._last_passed_candidates, stats.last_scan_ts))
+                    log.info("/passed replied.")
+                elif text.startswith("/tier2"):
+                    _reply(chat_id, m4.build_tier2_message(
+                        m5._active_watch, m5._active_watch_ts,
+                        m5._cmc_data_cache, m5._cmc_price_cache))
+                    log.info("/tier2 replied.")
+                elif text.startswith("/blocked"):
+                    stats = tracker.get_daily_summary()
+                    _reply(chat_id, m4.build_blocked_message(
+                        m5._last_scan_outcomes, stats.last_scan_ts, m5._last_method_c_blocked))
+                    log.info("/blocked replied.")
                 elif text.startswith("/help"):
                     _reply(chat_id, m4.build_help_message())
                     log.info("/help replied.")

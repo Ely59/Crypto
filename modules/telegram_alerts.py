@@ -548,8 +548,10 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
     m15_ok = bool(t and t.m15_ema6_gt_ema12 and t.m15_rsi6 < 78)
     h4_ok  = bool(t and (t.h4_ema_ok or getattr(t, 'h4_transitioning', False)
                          or getattr(t, 'h4_method_b', False)))
+    h4_method_c_flag = bool(t and getattr(t, 'h4_method_c', False) and not getattr(t, 'h4_ema_ok', False))
+    h4_display = "🔄" if h4_method_c_flag else ck(h4_ok)
 
-    tf_row = f"5m {ck(m5_ok)}  15m {ck(m15_ok)}  4H {ck(h4_ok)}"
+    tf_row = f"5m {ck(m5_ok)}  15m {ck(m15_ok)}  4H {h4_display}"
     if _btc_bear_regime:
         tf_row += "  ⚠️ BEAR"
 
@@ -2051,6 +2053,106 @@ def build_summary_message(stats) -> str:
     return build_m5_daily_summary(stats)
 
 
+def build_passed_message(passed_candidates: list, last_scan_ts: str) -> str:
+    """/passed — All M1–M7 candidates from the last Tier 1 scan with gate status."""
+    if not passed_candidates:
+        return "📋 <b>M1–M7 PASSED</b>\n\nNo candidates in last scan data yet."
+
+    def _ck(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
+    lines = [
+        f"📋 <b>M1–M7 PASSED — Last scan {last_scan_ts}</b>",
+        f"{len(passed_candidates)} coins qualified:",
+        "",
+    ]
+    for i, p in enumerate(passed_candidates, 1):
+        sym       = p.get("symbol", "?")
+        score     = p.get("score", 0)
+        mcap      = p.get("mcap", 0.0)
+        ath_dist  = p.get("ath_dist_pct", 0.0)
+        m5_ok     = p.get("m5_ok", False)
+        m15_ok    = p.get("m15_ok", False)
+        h4_ok     = p.get("h4_ok", False)
+        rec       = p.get("rec", "PENDING")
+        detail    = p.get("detail", "")
+
+        mcap_str  = f"${mcap/1e6:.0f}M" if mcap >= 1e6 else f"${mcap:.0f}"
+        ath_str   = f"ATH -{ath_dist:.0f}%" if ath_dist > 0 else "ATH N/A"
+        score_str = f"Score {score}" if score > 0 else rec
+
+        tf_str = f"5m {_ck(m5_ok)} 15m {_ck(m15_ok)} 4H {_ck(h4_ok)}"
+        detail_str = f" — {detail}" if detail and rec not in {"STRONG ENTRY", "WATCH", "MONITOR", "PENDING"} else ""
+
+        lines.append(f"{i}. <b>{sym}</b>   {score_str} | {mcap_str} | {ath_str}")
+        lines.append(f"   {tf_str}{detail_str}")
+
+    return "\n".join(lines)
+
+
+def build_tier2_message(active_watch: set, active_watch_ts: dict,
+                        cmc_data_cache: dict, cmc_price_cache: dict) -> str:
+    """/tier2 — Active Tier 2 watch coins (5m momentum, rescanned every 5 min)."""
+    if not active_watch:
+        return "👁️ <b>TIER 2 ACTIVE WATCH</b>\n\nNo coins in Tier 2 watch right now."
+
+    import time as _time
+    now = _time.time()
+
+    lines = [
+        f"👁️ <b>TIER 2 ACTIVE WATCH — {len(active_watch)} coins</b>",
+        "Rescanned every 5 min",
+        "",
+    ]
+    items = sorted(active_watch)
+    for i, mexc_sym in enumerate(items, 1):
+        sym   = mexc_sym.replace("_USDT", "")
+        price = cmc_price_cache.get(sym, 0.0)
+        ts    = active_watch_ts.get(mexc_sym, 0.0)
+
+        price_str = f"${price:.6g}" if price > 0 else "N/A"
+        if ts > 0:
+            elapsed = int(now - ts)
+            if elapsed < 60:
+                added_str = f"added {elapsed}s ago"
+            else:
+                added_str = f"added {elapsed // 60}m ago"
+        else:
+            added_str = "active"
+
+        lines.append(f"{i}. <b>{sym}</b>   {price_str} | 5m ✅ | {added_str}")
+
+    return "\n".join(lines)
+
+
+def build_blocked_message(scan_outcomes: list, last_scan_ts: str,
+                          method_c_blocked: list) -> str:
+    """/blocked — Coins blocked at 4H gate with reason, plus Method C coins below threshold."""
+    blocked = [o for o in scan_outcomes if o.rec == "MACRO_BLOCKED"]
+
+    lines = [f"🚫 <b>4H BLOCKED — Last scan {last_scan_ts}</b>"]
+
+    if not blocked and not method_c_blocked:
+        lines.append("\nNo coins were blocked in the last scan.")
+        return "\n".join(lines)
+
+    if blocked:
+        lines.append(f"{len(blocked)} coins blocked:")
+        lines.append("")
+        for i, o in enumerate(blocked, 1):
+            lines.append(f"{i}. <b>{o.symbol}</b>   {o.detail}")
+    else:
+        lines.append("")
+
+    if method_c_blocked:
+        lines.append("")
+        lines.append("Method C (transitioning, F&amp;G &lt;40) — scored below 70:")
+        for p in method_c_blocked:
+            lines.append(f"• <b>{p['symbol']}</b> — {p['detail']}")
+
+    return "\n".join(lines)
+
+
 def build_help_message() -> str:
     """/help — All available bot commands."""
     return "\n".join([
@@ -2064,6 +2166,9 @@ def build_help_message() -> str:
         "/explain COIN — What happened to a specific coin (e.g. /explain POLYX)",
         "/recovery — Near-miss Recovery Bounce candidates",
         "/summary  — Today's full stats summary",
+        "/passed   — All M1–M7 candidates from last scan with gate status",
+        "/tier2    — Active Tier 2 watch coins (5m momentum)",
+        "/blocked  — Coins blocked at 4H gate with reason",
         "/help     — This message",
         "",
         "/test     — Send a test alert (delivery check)",

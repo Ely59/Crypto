@@ -237,6 +237,9 @@ class TechResult:
     # 4H Momentum Method B: price > 8H ago + DIF rising + RSI > 42 + green candle
     h4_method_b:          bool  = False
 
+    # 4H Fear Mode Method C: EMA6 within 1.5% below EMA20, 4H rising, RSI > 35
+    h4_method_c:          bool  = False
+
 
 @dataclass
 class FundResult:
@@ -507,6 +510,18 @@ _cmc_data_cache: dict[str, tuple] = {}
 _tier1_last_run: float = 0.0
 _tier2_last_run: float = 0.0
 _tier3_last_run: float = 0.0
+
+# /passed — per-candidate data from last Tier1 scan (symbol, score, mcap, m5/m15/4H status)
+_last_passed_candidates: list[dict] = []
+
+# /tier2 — timestamps when each mexc_symbol was added to active_watch
+_active_watch_ts: dict[str, float] = {}
+
+# /tier2 — last known CMC price per symbol (from last Tier1)
+_cmc_price_cache: dict[str, float] = {}
+
+# /blocked — Method C coins that scored below 70 in last scan
+_last_method_c_blocked: list[dict] = []
 
 # ── Global per-coin cooldown — CHANGE 5A ─────────────────────────────────────
 # Stores: symbol → (timestamp, rec_type, price_at_alert)
@@ -960,6 +975,17 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     # FIX 4: KDJ is a warning, not a blocker — only EMA stack gates entry
     macro_ok = h4_ema_ok
 
+    # Method C: Fear Mode transitioning bypass conditions (evaluated here; bypass decision in scan())
+    # EMA6 within 1.5% below EMA20 + 4H price rising + RSI > 35 — only relevant when EMA bearish
+    _mc_ema_gap = (h4_ema20 - h4_ema6) / h4_ema20 if h4_ema20 > 0 else 1.0
+    _mc_rising  = len(close_4h) >= 3 and float(close_4h.iloc[-1]) > float(close_4h.iloc[-3])
+    h4_method_c = (
+        not h4_ema_ok and
+        _mc_ema_gap < 0.015 and  # EMA6 within 1.5% below EMA20
+        _mc_rising and            # 4H price higher than 2 candles ago
+        h4_rsi6 > 35             # not deeply oversold
+    )
+
     # ── 4H Volume ────────────────────────────────────────────────────────────
     vol_last = float(df_4h["volume"].iloc[-1])
     vol_ma10 = float(df_4h["volume"].rolling(10).mean().iloc[-1])
@@ -1066,6 +1092,7 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         m15_price_gt_h4_ema20=m15_price_gt_h4_ema20,
         h4_compression_days=h4_compression_days,
         h4_method_b=h4_method_b,
+        h4_method_c=h4_method_c,
     )
 
 
@@ -1668,10 +1695,14 @@ def scan() -> list[MomentumResult]:
         candidates.append(entry_tuple)
 
     # Cache CMC data keyed by symbol so Tier 2 can show real name/mcap/circ
-    global _cmc_data_cache
+    global _cmc_data_cache, _cmc_price_cache
     _cmc_data_cache = {
         sym: (n, tags, mc, vol, fv, fr, cp)
         for sym, n, tags, _, _, _, _, mc, vol, fv, fr, cp in candidates
+    }
+    _cmc_price_cache = {
+        sym: price
+        for sym, _, _, _, price, _, _, _, _, _, _, _ in candidates
     }
 
     # Stage 1 filter breakdown — logged every scan for pipeline analysis
@@ -1698,15 +1729,22 @@ def scan() -> list[MomentumResult]:
     log.info(f"5m pre-fetch: {len(_m5_cache)} symbols, {sum(1 for v in _m5_cache.values() if v is not None)} with data.")
 
     # Populate active_watch with coins showing 5m momentum (for Tier 2 rescans)
-    global _active_watch, _tier1_last_run
-    _active_watch = {
+    global _active_watch, _active_watch_ts, _tier1_last_run
+    _new_watch = {
         cand[3] for cand in candidates
         if _m5_cache.get(cand[3]) and (
             _m5_cache[cand[3]].get("ema6_gt_ema20") or
             _m5_cache[cand[3]].get("fresh_cross")
         )
     }
-    _tier1_last_run = time.time()
+    _now_ts = time.time()
+    for _sym in _new_watch - _active_watch:   # newly added
+        _active_watch_ts[_sym] = _now_ts
+    for _sym in list(_active_watch_ts.keys()):  # removed from watch
+        if _sym not in _new_watch:
+            del _active_watch_ts[_sym]
+    _active_watch = _new_watch
+    _tier1_last_run = _now_ts
     log.info(f"Tier 1: {len(_active_watch)} symbols added to active_watch.")
 
     # ── Stages 2 + 3: TA gate + full scoring ─────────────────────────────────
@@ -1714,6 +1752,8 @@ def scan() -> list[MomentumResult]:
     cooling_alerts:      list[MomentumResult] = []
     macro_blocked_count: int = 0
     sq_pending:          list[tuple] = []   # [(entry, tech, sq_score), ...] for Stage 2g
+    _passed_info:        dict[str, dict] = {}   # symbol → per-candidate gate status for /passed
+    _mc_blocked_scan:    list[dict] = []        # Method C coins scored < 70 for /blocked
 
     # Stage 2a block counters (CHANGE 2C)
     _s2a_ema_bearish:   int = 0   # EMA6 not > EMA12 > EMA20
@@ -1735,6 +1775,11 @@ def scan() -> list[MomentumResult]:
         (symbol, name, matched_tags, mexc_symbol,
          price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
 
+        # Per-candidate gate tracking for /passed command
+        _pi = {"symbol": symbol, "score": 0, "mcap": mcap, "ath_dist_pct": 0.0,
+               "m5_ok": False, "m15_ok": False, "h4_ok": False, "rec": "PENDING", "detail": ""}
+        _passed_info[symbol] = _pi
+
         # Dynamic vol threshold: fast move (>5%) vs slow trend (2-5%)
         vol_threshold = (cfg.MOMENTUM_VOL_FAST_MIN if change_1h > cfg.MOMENTUM_EARLY_1H_MAX
                          else cfg.MOMENTUM_VOL_SLOW_MIN)
@@ -1744,6 +1789,7 @@ def scan() -> list[MomentumResult]:
         if tech is None:
             log.warning(f"  TA skip  {symbol}: futures kline data unavailable")
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "NO_DATA", "MEXC kline unavailable", 0.0, 0.0))
+            _pi.update({"rec": "NO_DATA", "detail": "MEXC kline unavailable"})
             continue
 
         squeeze_bypass = False
@@ -1761,6 +1807,7 @@ def scan() -> list[MomentumResult]:
                 squeeze_bypass = True
                 tech.macro_ok  = True
                 _s2a_squeeze  += 1
+                _pi["h4_ok"]   = True
                 log.info(
                     f"  💥 SQUEEZE 2g  {symbol}: spread {ema_spread_pct:.2f}%  "
                     f"slope {tech.h4_ema20_slope:+.2f}%  vol {tech.m15_vol_spike_ratio:.1f}×  "
@@ -1793,6 +1840,7 @@ def scan() -> list[MomentumResult]:
                 if fear_sep_ok or rs_bypass:
                     tech.macro_ok = True
                     _s2a_fear_bypassed += 1
+                    _pi["h4_ok"] = True
                     reason = (f"sep {tech.h4_ema_sep:.3f}% ≥ {cfg.MOMENTUM_FEAR_EMA_SEP_MIN}%"
                               if fear_sep_ok else f"RS vs BTC {rs_vs_btc:+.1f}%")
                     log.info(f"  😟 FEAR bypass  {symbol}: {reason}")
@@ -1800,6 +1848,7 @@ def scan() -> list[MomentumResult]:
             # Method B: 4H momentum bypass (price>8H + DIF rising + RSI>42 + green candle)
             if not tech.macro_ok and tech.h4_method_b:
                 tech.macro_ok = True
+                _pi["h4_ok"]  = True
                 log.info(
                     f"  📈 4H-METHOD-B  {symbol}: "
                     f"price {price:.4g} rose over 8H, "
@@ -1810,30 +1859,49 @@ def scan() -> list[MomentumResult]:
             if not tech.macro_ok and h4_ema6_gt20 and tech.h4_ema6 > tech.h4_ema12 and change_24h > 0:
                 tech.macro_ok = True
                 tech.h4_transitioning = True
+                _pi["h4_ok"]  = True
                 log.info(f"  🔄 TRANSITION bypass  {symbol}: EMA6 > EMA12/EMA20 partial, 24H {change_24h:+.1f}%")
+
+            # Method C: Fear Mode EMA6 within 1.5% below EMA20, 4H rising, RSI > 35
+            if not tech.macro_ok and _fear_mode and _fg_value < 40 and tech.h4_method_c:
+                tech.macro_ok = True
+                tech.h4_transitioning = True  # triggers 🔄 in alert display
+                _pi["h4_ok"]  = True
+                log.info(
+                    f"  🔄 METHOD-C  {symbol}: EMA6 within 1.5% below EMA20, "
+                    f"4H price rising, RSI {tech.h4_rsi6:.0f}>35 — Fear Mode bypass"
+                )
 
             if not tech.macro_ok:
                 macro_blocked_count += 1
                 if not h4_order_ok:
                     _s2a_ema_bearish += 1
+                    _ema_gap_pct = (tech.h4_ema20 - tech.h4_ema6) / tech.h4_ema20 * 100.0 if tech.h4_ema20 > 0 else 0.0
+                    _blk_detail  = f"EMA bearish (6<20 by {_ema_gap_pct:.1f}%)"
                     log.info(
                         f"  MACRO ✗  {symbol}: EMA bearish  "
                         f"({tech.h4_ema6:.4g}/{tech.h4_ema12:.4g}/{tech.h4_ema20:.4g})"
                     )
                     _last_scan_outcomes.append(CandidateOutcome(
-                        symbol, change_1h, 0, "MACRO_BLOCKED", "4H EMA bearish",
+                        symbol, change_1h, 0, "MACRO_BLOCKED", _blk_detail,
                         tech.vol_pct, tech.h4_kdj_j))
+                    _pi.update({"rec": "MACRO_BLOCKED", "detail": _blk_detail})
                 else:
                     _s2a_sep_small += 1
+                    _fear_sfx   = " in fear mode" if _fear_mode else ""
+                    _blk_detail = f"EMA sep {tech.h4_ema_sep:.3f}% < 0.2%{_fear_sfx}"
                     log.info(
                         f"  MACRO ✗  {symbol}: EMA sep {tech.h4_ema_sep:.3f}% "
                         f"< {cfg.MOMENTUM_TA_H4_EMA_SEP_MIN * 100:.1f}%"
                     )
                     _last_scan_outcomes.append(CandidateOutcome(
-                        symbol, change_1h, 0, "MACRO_BLOCKED",
-                        f"EMA sep {tech.h4_ema_sep:.3f}% too small",
+                        symbol, change_1h, 0, "MACRO_BLOCKED", _blk_detail,
                         tech.vol_pct, tech.h4_kdj_j))
+                    _pi.update({"rec": "MACRO_BLOCKED", "detail": _blk_detail})
                 continue
+
+        # Coins reaching here have cleared the 4H gate (natively or via bypass)
+        _pi["h4_ok"] = True
 
         # ── GATE 2a: 15m EMA6 > EMA12 (hard gate) ─────────────────────────────
         if not tech.m15_ema6_gt_ema12 and not squeeze_bypass:
@@ -1843,7 +1911,10 @@ def scan() -> list[MomentumResult]:
             _last_scan_outcomes.append(CandidateOutcome(
                 symbol, change_1h, 0, "MACRO_BLOCKED", "15m EMA6 < EMA12",
                 tech.vol_pct, tech.h4_kdj_j))
+            _pi.update({"rec": "MACRO_BLOCKED", "detail": "15m EMA6 < EMA12"})
             continue
+
+        _pi["m15_ok"] = True
 
         # FIX 4: dead-zone blocker — very low volume AND low momentum = skip
         if (tech.vol_pct < cfg.MOMENTUM_DEAD_VOL_PCT * 100 and
@@ -1852,7 +1923,9 @@ def scan() -> list[MomentumResult]:
                 f"  DEAD ZONE {symbol}: vol {tech.vol_pct:.0f}% + 1H {change_1h:+.1f}% "
                 f"— no momentum"
             )
-            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "DEAD_ZONE", f"Vol {tech.vol_pct:.0f}% of MA10 + only {change_1h:.1f}% 1H", tech.vol_pct, tech.h4_kdj_j))
+            _dz_detail = f"Vol {tech.vol_pct:.0f}% of MA10 + only {change_1h:.1f}% 1H"
+            _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "DEAD_ZONE", _dz_detail, tech.vol_pct, tech.h4_kdj_j))
+            _pi.update({"rec": "DEAD_ZONE", "detail": _dz_detail})
             continue
 
         # 5m primary gate — use pre-fetched cache (replaces 1H gate)
@@ -1860,7 +1933,10 @@ def scan() -> list[MomentumResult]:
         if not _base_5m_gate_ok(_m5):
             log.debug(f"  5m gate ✗  {symbol}: gate failed (EMA/RSI/vol)")
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "MACRO_BLOCKED", "5m gate: EMA/RSI/vol not aligned", tech.vol_pct, tech.h4_kdj_j))
+            _pi.update({"rec": "5M_BLOCKED", "detail": "5m gate: EMA/RSI/vol not aligned"})
             continue
+
+        _pi["m5_ok"] = True
 
         # Populate tech.m5_* from cache
         _apply_5m_to_tech(tech, _m5)
@@ -1877,15 +1953,28 @@ def scan() -> list[MomentumResult]:
             log.info(f"  ATH BLOCK  {symbol}: only {real_ath_dist:.1f}% below ATH")
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "ATH_BLOCK",
                 f"Only {real_ath_dist:.1f}% below ATH — hard block", tech.vol_pct, tech.h4_kdj_j))
+            _pi.update({"ath_dist_pct": real_ath_dist, "rec": "ATH_BLOCK",
+                        "detail": f"Only {real_ath_dist:.1f}% below ATH — hard block"})
             continue
 
+        _pi["ath_dist_pct"] = real_ath_dist
         ath_pts = _ath_score(real_ath_dist)
 
         # Total score
         total = tech.score + fund.total + ath_pts
 
-        # 4H Transition Mode penalty: -5 pts for incomplete EMA stack
-        if tech.h4_transitioning:
+        # 4H Transition penalty: Method C (Fear Mode bypass) gets -8 + min score 70;
+        # regular transition gets -5 pts for incomplete EMA stack
+        if tech.h4_transitioning and tech.h4_method_c:
+            total = max(0, total - 8)
+            if total < 70:
+                _mc_detail = f"Method C: score {total}/100 < 70 required"
+                _mc_blocked_scan.append({"symbol": symbol, "score": total, "detail": _mc_detail})
+                _last_scan_outcomes.append(CandidateOutcome(
+                    symbol, change_1h, total, "BELOW_THRESHOLD", _mc_detail, tech.vol_pct, tech.h4_kdj_j))
+                _pi.update({"score": total, "rec": "METHOD_C_BLOCKED", "detail": _mc_detail})
+                continue
+        elif tech.h4_transitioning:
             total = max(0, total - 5)
 
         # Method B penalty: -3 pts (alternative 4H gate, less confirmation than full EMA stack)
@@ -1927,6 +2016,8 @@ def scan() -> list[MomentumResult]:
                                        _inf_supply_map.get(symbol, False),
                                        is_micro_cap=(symbol in _micro_cap_set),
                                        mcap=mcap)
+
+        _pi.update({"score": total, "rec": recommendation})
 
         log.info(
             f"  {rec_emoji} {recommendation}  {symbol}  {total}/100  "
@@ -1974,6 +2065,11 @@ def scan() -> list[MomentumResult]:
             m5_note         = tech.m5_note,
             squeeze_bypass  = squeeze_bypass,
         ))
+
+    # Export per-candidate pass data for /passed and /blocked commands
+    global _last_passed_candidates, _last_method_c_blocked
+    _last_passed_candidates = list(_passed_info.values())
+    _last_method_c_blocked  = _mc_blocked_scan
 
     # Stage 2a block breakdown log (CHANGE 2C)
     log.info(

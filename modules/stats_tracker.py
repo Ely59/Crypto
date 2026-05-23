@@ -242,7 +242,7 @@ class StatsTracker:
 
             fear_banner = (
                 f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — "
-                f"Stage 2a relaxed to 0.05% sep\n"
+                f"Stage 2a relaxed + 4H transitioning bypass enabled (Method C)\n"
                 if s.fear_mode_active else ""
             )
 
@@ -259,7 +259,7 @@ class StatsTracker:
                             s.early_gc_alerts + s.signal_alerts)
             lines = []
             if s.fear_mode_active:
-                lines.append(f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — Stage 2a relaxed to 0.05% sep")
+                lines.append(f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — Stage 2a relaxed + 4H transitioning bypass enabled (Method C)")
             lines += [
                 f"Last scan: <b>{s.last_scan_ts}</b> Berlin  |  Next in <b>{next_min} min</b>",
                 f"Scans today: <b>{s.scan_count}</b>  |  Margin: ${cfg.DEFAULT_MARGIN_USDT:.0f} | Leverage: {cfg.DEFAULT_LEVERAGE}x | Max: {cfg.MAX_OPEN_POSITIONS} trades",
