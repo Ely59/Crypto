@@ -20,7 +20,8 @@ from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-_BASE = "https://contract.mexc.com"
+_BASE        = "https://contract.mexc.com"
+_RECV_WINDOW = "5000"   # milliseconds; required in MEXC futures signature
 
 # ── Daily loss tracking (reset at UTC midnight) ───────────────────────────────
 _daily_risk_usd:   float = 0.0    # cumulative worst-case risk placed today
@@ -33,8 +34,8 @@ _last_balance:     float = 0.0    # cached balance for loss-limit comparison
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _sign(api_key: str, api_secret: str, timestamp: str, body: str) -> str:
-    """MEXC signature: HMAC-SHA256(secret, api_key + timestamp + body_string)."""
-    message = api_key + timestamp + body
+    """MEXC futures signature: HMAC-SHA256(secret, api_key + timestamp + recv_window + params)."""
+    message = api_key + timestamp + _RECV_WINDOW + body
     return hmac.new(
         api_secret.encode("utf-8"),
         message.encode("utf-8"),
@@ -53,6 +54,7 @@ def _auth_headers(timestamp: str, body: str) -> dict | None:
         "Content-Type": "application/json",
         "Apikey":       key,
         "Request-Time": timestamp,
+        "RecvWindow":   _RECV_WINDOW,
         "Signature":    _sign(key, secret, timestamp, body),
     }
 
@@ -62,7 +64,10 @@ def _post(endpoint: str, payload: dict) -> dict | None:
     key      = cfg.MEXC_API_KEY or ""
     ts       = str(int(time.time() * 1000))
     body_str = json.dumps(payload, separators=(",", ":"))
-    sign_msg = key + ts + body_str
+    sign_msg = key + ts + _RECV_WINDOW + body_str
+    print(f"[MEXC DEBUG] POST {endpoint}")
+    print(f"[MEXC DEBUG] payload: {body_str}")
+    print(f"[MEXC DEBUG] sign-string (first 200): {sign_msg[:200]}")
     log.debug(f"MEXC sign-string: {sign_msg[:200]}")
     headers  = _auth_headers(ts, body_str)
     if headers is None:
@@ -70,17 +75,18 @@ def _post(endpoint: str, payload: dict) -> dict | None:
     try:
         resp = requests.post(f"{_BASE}{endpoint}", headers=headers,
                              data=body_str, timeout=10)
-        if resp.status_code != 200:
-            log.error(
-                f"MEXC POST {endpoint} HTTP {resp.status_code} — "
-                f"body: {resp.text[:500]}"
-            )
-            try:
-                return resp.json()   # return body so callers can inspect error message
-            except Exception:
-                return None
-        return resp.json()
+        print(f"[MEXC DEBUG] STATUS: {resp.status_code}")
+        print(f"[MEXC DEBUG] BODY: {resp.text[:2000]}")
+        log.error(
+            f"MEXC POST {endpoint} HTTP {resp.status_code} — body: {resp.text[:500]}"
+        ) if resp.status_code != 200 else None
+        try:
+            return resp.json()
+        except Exception:
+            log.error(f"MEXC POST {endpoint}: response is not JSON — body: {resp.text[:500]}")
+            return None
     except Exception as e:
+        print(f"[MEXC DEBUG] EXCEPTION: {e}")
         log.error(f"MEXC POST {endpoint} failed: {e}")
         return None
 
@@ -92,14 +98,53 @@ def _get_auth(endpoint: str, params: dict | None = None) -> dict | None:
     headers   = _auth_headers(ts, param_str)
     if headers is None:
         return None
+    print(f"[MEXC DEBUG] GET {endpoint}  params={params}")
     try:
         resp = requests.get(f"{_BASE}{endpoint}", headers=headers,
                             params=params, timeout=10)
+        print(f"[MEXC DEBUG] STATUS: {resp.status_code}")
+        print(f"[MEXC DEBUG] BODY: {resp.text[:2000]}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
+        print(f"[MEXC DEBUG] EXCEPTION: {e}")
         log.error(f"MEXC GET {endpoint} failed: {e}")
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Contract detail cache
+# ══════════════════════════════════════════════════════════════════════════════
+
+_contract_detail_cache: dict[str, dict] = {}
+
+
+def _get_contract_detail(symbol: str) -> dict:
+    """
+    Fetch and cache MEXC contract detail for a symbol.
+    Returns dict with at least {"contractSize": 1, "priceScale": 4, "minVol": 1}.
+    Falls back to safe defaults on error.
+    """
+    if symbol in _contract_detail_cache:
+        return _contract_detail_cache[symbol]
+    defaults = {"contractSize": 1, "priceScale": 4, "minVol": 1, "volUnit": 1}
+    try:
+        resp = requests.get(
+            f"{_BASE}/api/v1/contract/detail",
+            params={"symbol": symbol},
+            timeout=8,
+        )
+        data = resp.json()
+        print(f"[MEXC DEBUG] contract/detail STATUS: {resp.status_code}")
+        print(f"[MEXC DEBUG] contract/detail BODY: {resp.text[:800]}")
+        if data.get("success") and data.get("data"):
+            detail = data["data"]
+            _contract_detail_cache[symbol] = detail
+            return detail
+    except Exception as e:
+        print(f"[MEXC DEBUG] contract/detail EXCEPTION: {e}")
+        log.warning(f"Could not fetch contract detail for {symbol}: {e}")
+    return defaults
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -185,18 +230,26 @@ def place_futures_order(
         log.warning(f"Set leverage {leverage}x for {sym}: {lev_resp.get('message')}")
 
     # Step 2 — calculate quantity (contracts)
+    # MEXC: vol = position_size_usdt / (contractSize × price)
+    # contractSize varies per coin (e.g. SKYAI_USDT=10, BTC_USDT=0.0001)
+    detail        = _get_contract_detail(sym)
+    contract_size = float(detail.get("contractSize", 1) or 1)
+    min_vol       = int(detail.get("minVol", 1) or 1)
     position_size = margin_usdt * leverage
-    quantity      = max(1, round(position_size / price))
+    raw_qty       = position_size / (contract_size * price) if price > 0 else 1
+    quantity      = max(min_vol, round(raw_qty))
+    print(f"[MEXC DEBUG] qty calc: pos={position_size:.4f} contractSize={contract_size} price={price:.6g} raw={raw_qty:.3f} → vol={quantity}")
 
     # Step 3 — submit limit order
     # MEXC side: 1=open long, 2=close long, 3=open short, 4=close short
     api_side  = 1 if side.upper() == "BUY" else 3
+    price_scale = int(detail.get("priceScale", 4) or 4)
     order_resp = _post("/api/v1/private/order/submit", {
         "symbol":   sym,
         "side":     api_side,
         "openType": 1,       # isolated
         "type":     1,       # limit
-        "price":    str(round(price, 8)),
+        "price":    f"{price:.{price_scale}f}",
         "vol":      str(quantity),
         "leverage": leverage,
     })
@@ -339,3 +392,87 @@ def log_trade(
             ])
     except Exception as e:
         log.error(f"Trade log write failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Debug test — run directly: python modules/mexc_trader.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    import sys as _sys
+    import os as _os
+    _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _ROOT not in _sys.path:
+        _sys.path.insert(0, _ROOT)
+
+    print("=== MEXC Futures Debug Test ===")
+    print(f"Base URL  : {_BASE}")
+    print(f"RecvWindow: {_RECV_WINDOW}")
+    print(f"API key   : {cfg.MEXC_API_KEY[:8]}…" if cfg.MEXC_API_KEY else "API key   : NOT SET")
+    print(f"API secret: {'SET' if cfg.MEXC_API_SECRET else 'NOT SET'}")
+    print()
+
+    # Step 1: check contract detail for SKYAI to confirm symbol format
+    print("--- Step 1: Contract detail for SKYAI_USDT ---")
+    detail_resp = requests.get(
+        f"{_BASE}/api/v1/contract/detail",
+        params={"symbol": "SKYAI_USDT"},
+        timeout=10,
+    )
+    print(f"STATUS: {detail_resp.status_code}")
+    print(f"BODY  : {detail_resp.text[:1000]}")
+    print()
+
+    # Step 2: account balance (authenticated GET)
+    print("--- Step 2: Account balance ---")
+    bal = get_account_balance()
+    print(f"Balance: {bal}")
+    print()
+
+    # Step 3: fetch current SKYAI price (ticker, then klines fallback)
+    print("--- Step 3: SKYAI current price ---")
+    skyai_price = 0.0
+    try:
+        ticker_resp = requests.get(
+            f"{_BASE}/api/v1/contract/ticker",
+            params={"symbol": "SKYAI_USDT"},
+            timeout=8,
+        )
+        print(f"Ticker STATUS: {ticker_resp.status_code}")
+        print(f"Ticker BODY  : {ticker_resp.text[:400]}")
+        tdata = ticker_resp.json().get("data") or {}
+        skyai_price = float(tdata.get("lastPrice", 0) or 0)
+    except Exception as _e:
+        print(f"Ticker error: {_e}")
+    if skyai_price <= 0:
+        try:
+            from utils.api_client import get_mexc_futures_klines
+            df = get_mexc_futures_klines("SKYAI_USDT", "1h", limit=2)
+            if df is not None and not df.empty:
+                skyai_price = float(df["close"].iloc[-1])
+        except Exception as _e2:
+            print(f"Klines fallback error: {_e2}")
+    print(f"SKYAI price: {skyai_price}")
+    print()
+
+    if skyai_price <= 0:
+        print("Cannot place test order — price unavailable.")
+        _sys.exit(1)
+
+    # Step 4: test order — $1 margin, 5× leverage, limit buy
+    print("--- Step 4: Place test order (SKYAI $1 margin, 5× leverage) ---")
+    sl_price  = round(skyai_price * 0.94, 8)
+    tp1_price = round(skyai_price * 1.10, 8)
+    result = place_futures_order(
+        symbol      = "SKYAI_USDT",
+        side        = "BUY",
+        order_type  = "LIMIT",
+        price       = skyai_price,
+        margin_usdt = 1.0,
+        leverage    = 5,
+        sl_price    = sl_price,
+        tp1_price   = tp1_price,
+    )
+    print()
+    print(f"=== RESULT ===")
+    print(result)
