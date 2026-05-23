@@ -409,11 +409,11 @@ MEXC_API_KEY    = os.getenv("MEXC_API_KEY", "").strip()
 MEXC_API_SECRET = os.getenv("MEXC_API_SECRET", "").strip()
 
 # ─── Trading defaults (session-overridable via /setmargin, /setleverage) ─────
-DEFAULT_MARGIN_USDT = float(os.getenv("DEFAULT_MARGIN_USDT", "10").strip() or "10")
+DEFAULT_MARGIN_USDT = float(os.getenv("DEFAULT_MARGIN_USDT", "5").strip() or "5")
 DEFAULT_LEVERAGE    = int(os.getenv("DEFAULT_LEVERAGE",    "5").strip()  or "5")
 
 # ─── Safety rules ─────────────────────────────────────────────────────────────
-MAX_OPEN_POSITIONS    = 2      # hard cap on concurrent bot-placed positions
+MAX_OPEN_POSITIONS    = 4      # hard cap on concurrent bot-placed positions
 DAILY_LOSS_LIMIT_PCT  = 15.0   # block new orders when cumulative risk > 15% of balance
 MARGIN_MIN_USDT       = 5.0    # minimum margin per order
 MARGIN_MAX_USDT       = 50.0   # maximum margin per order

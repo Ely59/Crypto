@@ -82,6 +82,9 @@ def run_daily_briefing():
         log.error("Module 1 failed — skipping today's briefing.")
         return
 
+    # Update BTC bear flag so alert builders can show ⚠️ BEAR on line 4
+    m4.set_btc_bear(btc_context.regime == "BEAR")
+
     scout_results, avoid_coins = m2.full_scan(btc_context)
 
     for coin in scout_results:

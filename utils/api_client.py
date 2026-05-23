@@ -361,19 +361,22 @@ def get_coingecko_ath_map(limit: int = 500) -> dict:
 
 def get_btc_funding_rate() -> Optional[float]:
     """
-    Latest perpetual funding rate for BTCUSDT from Binance Futures.
+    Latest perpetual funding rate for BTCUSDT from MEXC Contract API (no key needed).
     Returns a decimal (e.g. 0.0001 = 0.01%).
     Positive  → longs paying shorts (bearish pressure on price).
     Negative  → shorts paying longs (bullish pressure on price).
     """
-    url  = f"{BINANCE_FUTURES_BASE_URL}/fapi/v1/fundingRate"
-    data = _get(url, params={"symbol": "BTCUSDT", "limit": 1})
-    if data and isinstance(data, list) and len(data) > 0:
-        try:
-            return float(data[0]["fundingRate"])
-        except (KeyError, ValueError, TypeError):
-            pass
-    log.error("Funding rate fetch failed")
+    try:
+        resp = requests.get(
+            f"{MEXC_CONTRACT_BASE_URL}/api/v1/contract/funding_rate/BTCUSDT",
+            timeout=5,
+        )
+        data = resp.json()
+        rate = (data.get("data") or {}).get("fundingRate")
+        if rate is not None:
+            return float(rate)
+    except Exception as e:
+        log.error(f"MEXC funding rate fetch failed: {e}")
     return None
 
 

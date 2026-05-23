@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
+import config as cfg
+
 _BERLIN = ZoneInfo("Europe/Berlin")
 _UTC    = timezone.utc
 
@@ -260,7 +262,7 @@ class StatsTracker:
                 lines.append(f"😟 <b>Fear Mode ACTIVE</b> (F&G: {s.fear_greed_value}) — Stage 2a relaxed to 0.05% sep")
             lines += [
                 f"Last scan: <b>{s.last_scan_ts}</b> Berlin  |  Next in <b>{next_min} min</b>",
-                f"Scans today: <b>{s.scan_count}</b>",
+                f"Scans today: <b>{s.scan_count}</b>  |  Margin: ${cfg.DEFAULT_MARGIN_USDT:.0f} | Leverage: {cfg.DEFAULT_LEVERAGE}x | Max: {cfg.MAX_OPEN_POSITIONS} trades",
                 "",
                 f"M1–M7 passed: <b>{s.coins_analyzed}</b>  |  4H blocked: <b>{s.macro_blocked}</b>",
                 f"  └ EMA bearish: {s.s2a_ema_bearish} | Sep &lt;0.2%: {s.s2a_sep_small} | "

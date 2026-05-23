@@ -377,6 +377,43 @@ def _signal_chain_lines(coin) -> list[str]:
 
 _SEP = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+# ── BTC bear regime flag (set by main.py after each briefing) ─────────────────
+_btc_bear_regime: bool = False
+
+def set_btc_bear(value: bool) -> None:
+    """Call from main.py when btc_context.regime is known."""
+    global _btc_bear_regime
+    _btc_bear_regime = value
+
+
+# ── MEXC tick-size cache: symbol → (price_scale, cached_at) ──────────────────
+_tick_size_cache: dict[str, tuple[int, float]] = {}
+
+def _get_price_scale(mexc_symbol: str) -> int:
+    """
+    Return the number of decimal places MEXC uses for this contract.
+    Fetched from contract/detail API and cached for 24 h.
+    Falls back to 4 decimals on any error.
+    """
+    cached = _tick_size_cache.get(mexc_symbol)
+    if cached:
+        scale, ts = cached
+        if time.time() - ts < 86_400:
+            return scale
+    try:
+        sym = mexc_symbol if mexc_symbol.endswith("USDT") else mexc_symbol.replace("_USDT", "") + "USDT"
+        resp = _requests.get(
+            "https://contract.mexc.com/api/v1/contract/detail",
+            params={"symbol": sym},
+            timeout=5,
+        )
+        data = resp.json()
+        scale = int((data.get("data") or {}).get("priceScale", 4))
+    except Exception:
+        scale = 4
+    _tick_size_cache[mexc_symbol] = (scale, time.time())
+    return scale
+
 
 def _fmt_price_dollar(price: float) -> str:
     """Format price with $ prefix and tiered decimal precision. Never strips trailing zeros."""
@@ -460,36 +497,26 @@ def _auto_sentence(coin, sector: str) -> str:
         return f"{sector} coin, {ath_part}{circ_part}. {tf_str} aligned — {rec.lower()} confirmed."
 
 
-def build_unified_alert(coin) -> str:
+def build_unified_alert(coin, margin: float | None = None, leverage: int | None = None) -> str:
     """
-    Universal 15-line alert format for ALL signal types (MASTER PROMPT Part E).
+    Unified alert format for ALL signal types.
 
-    LINE 1:  icon COIN — RECOMMENDATION score/100 emoji
+    LINE 1:  icon COIN — TYPE [score/100emoji]
     LINE 2:  ━━━━ separator
-    LINE 3:  "auto-generated sentence"
-    LINE 4:  empty
-    LINES 5-8: 📌 SET MEXC ALERTS with Breakout + Pullback levels
-    LINE 9:  empty
-    LINE 10: 📊  5m ✅/❌  15m ✅/❌  4H ✅/❌
-    LINE 11: ⚠️ warnings (max 3, only if present)
-    LINE 12: empty
-    LINE 13: MCap $XM | ATH -X% | Circ X%
-    LINE 14: ━━━━ separator
-    LINE 15: COIN_USDT  MEXC Futures (linked)
+    LINE 3:  MCap $XM | ATH -X% | Circ X%
+    LINE 4:  5m ✅/❌  15m ✅/❌  4H ✅/❌  [⚠️ BEAR if btc bear]
+    LINE 5:  (⚡ FAST MOVE if SPEED ALERT)
+    LINE 6:  empty
+    LINE 7:  📊 LEVELS
+    LINE 8+: price levels sorted HIGH → LOW
+    LINE X:  empty
     """
+    import config as _cfg
+
     t   = coin.tech
     rec = coin.recommendation
-
-    # ── Sector label ──────────────────────────────────────────────────────────
-    try:
-        from modules.momentum_scanner import category_label
-        sector = category_label(coin)
-    except Exception:
-        tags   = getattr(coin, 'matched_tags', None) or []
-        sector = tags[0].replace("-", " ").title() if tags else ""
-    # Fallback: use coin name from CMC rather than "Unknown"
-    if not sector or sector == "Unknown":
-        sector = getattr(coin, 'name', '') or coin.symbol
+    _m  = margin   if margin   is not None else _cfg.DEFAULT_MARGIN_USDT
+    _lv = leverage if leverage is not None else _cfg.DEFAULT_LEVERAGE
 
     # ── Line 1: Header ────────────────────────────────────────────────────────
     _NO_SCORE_RECS = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE",
@@ -497,44 +524,18 @@ def build_unified_alert(coin) -> str:
     has_score = rec not in _NO_SCORE_RECS and coin.total_score > 0
     if has_score:
         s_em  = _score_emoji(coin.total_score)
-        line1 = f"{coin.rec_emoji} <b>{coin.symbol}</b> — {rec} {coin.total_score}/100{s_em}"
+        line1 = f"{coin.rec_emoji} <b>{coin.symbol}</b> — {rec} [{coin.total_score}/100{s_em}]"
     else:
         line1 = f"{coin.rec_emoji} <b>{coin.symbol}</b> — {rec}"
 
-    # ── Line 3: Auto-sentence ─────────────────────────────────────────────────
-    sentence = _auto_sentence(coin, sector)
+    # ── Line 3: Metadata ──────────────────────────────────────────────────────
+    ath_dist = getattr(coin, 'ath_dist_pct', 0.0)
+    circ_pct = getattr(coin, 'circ_supply_pct', 0.0)
+    mcap_str = _vol_human(coin.market_cap) if coin.market_cap > 0 else "N/A"
+    circ_str = f"{circ_pct:.0f}%" if circ_pct > 0 else "N/A"
+    meta_line = f"MCap {mcap_str} | ATH -{ath_dist:.0f}% | Circ {circ_str}"
 
-    # ── Lines 5-8: MEXC Alerts ────────────────────────────────────────────────
-    entry = coin.entry_price or coin.price or 0.0
-    if entry > 0:
-        sl_fac  = coin.stop_loss / entry if coin.stop_loss > 0 else (1 - coin.sl_pct / 100)
-        tp1_fac = coin.tp1       / entry if coin.tp1 > 0       else 1.10
-        tp2_fac = coin.tp2       / entry if coin.tp2 > 0       else 1.20
-    else:
-        sl_fac, tp1_fac, tp2_fac = 0.94, 1.10, 1.20
-
-    bk_price = entry
-    bk_sl    = bk_price * sl_fac
-    bk_tp1   = bk_price * tp1_fac
-    bk_tp2   = bk_price * tp2_fac
-
-    pb_ema20 = (t.m5_ema20 if (t and t.m5_ema20 > 0 and t.m5_ema20 < entry * 0.999) else 0.0)
-    pb_price = pb_ema20 if pb_ema20 > 0 else entry * 0.97
-    pb_sl    = pb_price * sl_fac
-    pb_tp1   = pb_price * tp1_fac
-    pb_tp2   = pb_price * tp2_fac
-
-    fd = _fmt_price_dollar
-    mexc_block = [
-        "📌 <b>SET MEXC ALERTS:</b>",
-        f"🔴 Breakout  {fd(bk_price)}",
-        f"   SL {fd(bk_sl)} | TP1 {fd(bk_tp1)} | TP2 {fd(bk_tp2)}",
-        f"🟢 Pullback  {fd(pb_price)}",
-        f"   SL {fd(pb_sl)} | TP1 {fd(pb_tp1)} | TP2 {fd(pb_tp2)}",
-        "   (verify 1m before placing)",
-    ]
-
-    # ── Line 10: Status row ───────────────────────────────────────────────────
+    # ── Line 4: TF status row ─────────────────────────────────────────────────
     def ck(ok: bool) -> str:
         return "✅" if ok else "❌"
 
@@ -548,44 +549,61 @@ def build_unified_alert(coin) -> str:
     h4_ok  = bool(t and (t.h4_ema_ok or getattr(t, 'h4_transitioning', False)
                          or getattr(t, 'h4_method_b', False)))
 
-    status_row = f"📊  5m {ck(m5_ok)}  15m {ck(m15_ok)}  4H {ck(h4_ok)}"
+    tf_row = f"5m {ck(m5_ok)}  15m {ck(m15_ok)}  4H {ck(h4_ok)}"
+    if _btc_bear_regime:
+        tf_row += "  ⚠️ BEAR"
 
-    # ── Line 11: Warnings (max 3, joined by |) ────────────────────────────────
-    all_warnings: list[str] = []
-    m5_note = getattr(coin, 'm5_note', '') or (t.m5_note if t else '')
-    if m5_note:
-        all_warnings.append(m5_note)
-    for w in (coin.warnings or []):
-        if w not in all_warnings:
-            all_warnings.append(w)
-    all_warnings = all_warnings[:3]
-    warning_line = ("⚠️ " + " | ".join(all_warnings)) if all_warnings else ""
+    # ── Tick-size aware price formatter ───────────────────────────────────────
+    mexc_sym = getattr(coin, 'mexc_symbol', f"{coin.symbol}_USDT")
+    scale    = _get_price_scale(mexc_sym)
+    def fp(p: float) -> str:
+        return f"${p:.{scale}f}"
 
-    # ── Line 13: Metadata ─────────────────────────────────────────────────────
-    ath_dist = getattr(coin, 'ath_dist_pct', 0.0)
-    circ_pct = getattr(coin, 'circ_supply_pct', 0.0)
-    mcap_str = _vol_human(coin.market_cap) if coin.market_cap > 0 else "N/A"
-    circ_str = f"{circ_pct:.0f}%" if circ_pct > 0 else "N/A"
-    meta_line = f"MCap {mcap_str} | ATH -{ath_dist:.0f}% | Circ {circ_str}"
+    # ── Price level calculations ───────────────────────────────────────────────
+    entry    = coin.entry_price or coin.price or 0.0
+    pullback = (t.m5_ema20
+                if (t and t.m5_ema20 > 0 and t.m5_ema20 < entry * 0.9995)
+                else entry)
+    sl_pct   = getattr(coin, 'sl_pct', None) or _cfg.MOMENTUM_SL_PCT
+    sl       = pullback * (1 - sl_pct / 100)
 
-    mexc_url = f"https://futures.mexc.com/exchange/{coin.mexc_symbol}"
+    h24h     = (t.h24_high if (t and t.h24_high > 0) else entry)
+    breakout = h24h * 1.005
+    tp1      = pullback * 1.08
+    tp2      = pullback * 1.15
+
+    pos_size = _m * _lv
+    profit1  = pos_size * 0.08 * 0.59
+    profit2  = pos_size * 0.15 * 0.41
+
+    # ── Sort levels high → low ────────────────────────────────────────────────
+    levels: list[tuple[float, str]] = [
+        (tp2,      f"── TP2  +15% → +${profit2:.2f} (runner)"),
+        (tp1,      f"── TP1  +8%  → +${profit1:.2f} (59% close)"),
+        (h24h,     "── 24H High"),
+        (breakout, "── Breakout"),
+        (pullback, "── Pullback  ← best R/R"),
+        (sl,       f"▁▁ SL  -{sl_pct:.0f}%"),
+    ]
+    levels.sort(key=lambda x: x[0], reverse=True)
+    level_lines = [f"{fp(price)} {label}" for price, label in levels]
+
+    # ── Only warning kept: Circ <40% ─────────────────────────────────────────
+    circ_warn = ("⚠️ Circ <40% — unlock risk" if (circ_pct > 0 and circ_pct < 40) else "")
 
     # ── Assemble ──────────────────────────────────────────────────────────────
-    lines: list[str] = [line1, _SEP, f'"{sentence}"']
+    lines: list[str] = [line1, _SEP, meta_line, tf_row]
 
     if rec == "SPEED ALERT":
-        lines.append("⚡ FAST MOVE — act within 10 minutes")
+        lines.append("⚡ FAST MOVE — act within 10 min")
 
     lines.append("")
-    lines.extend(mexc_block)
+    lines.append("📊 LEVELS")
+    lines.extend(level_lines)
     lines.append("")
-    lines.append(status_row)
-    if warning_line:
-        lines.append(warning_line)
-    lines.append("")
-    lines.append(meta_line)
-    lines.append(_SEP)
-    lines.append(f'<a href="{mexc_url}">{coin.mexc_symbol}  MEXC Futures</a>')
+
+    if circ_warn:
+        lines.append(circ_warn)
 
     return "\n".join(lines)
 
@@ -2114,23 +2132,30 @@ def _build_coin_keyboard(coin, margin: float, leverage: int) -> "InlineKeyboardM
     """
     Register breakout + pullback pending orders for a MomentumResult coin and
     return an InlineKeyboardMarkup with the three standard buttons.
-    Called by every send_* function that has entry_price / stop_loss data.
+    Breakout = h24_high × 1.005, Pullback = 5m EMA20 — matches build_unified_alert.
     """
-    sym          = coin.symbol
-    mexc_sym     = getattr(coin, "mexc_symbol", f"{sym}_USDT")
-    sl_factor    = coin.stop_loss / coin.entry_price if coin.entry_price > 0 else 0.94
-    tp1_factor   = coin.tp1 / coin.entry_price if coin.entry_price > 0 else 1.10
-    tp2_factor   = coin.tp2 / coin.entry_price if coin.entry_price > 0 else 1.20
+    import config as _cfg
+    sym      = coin.symbol
+    mexc_sym = getattr(coin, "mexc_symbol", f"{sym}_USDT")
+    t        = coin.tech
+    entry    = coin.entry_price or coin.price or 0.0
+    sl_pct   = getattr(coin, 'sl_pct', None) or _cfg.MOMENTUM_SL_PCT
 
-    bk_price = coin.entry_price
+    # Breakout = 24H high × 1.005 (resistance break level)
+    h24h     = t.h24_high if (t and t.h24_high > 0) else entry
+    bk_price = round(h24h * 1.005, 8)
+
+    # Pullback = 5m EMA20 if below entry, else entry
+    pb_ema20 = (t.m5_ema20 if (t and t.m5_ema20 > 0 and t.m5_ema20 < entry * 0.9995) else 0.0)
+    pb_price = round(pb_ema20 if pb_ema20 > 0 else entry, 8)
+
+    sl_factor  = 1 - sl_pct / 100
+    tp1_factor = 1.08
+    tp2_factor = 1.15
+
     bk_sl    = round(bk_price * sl_factor,  8)
     bk_tp1   = round(bk_price * tp1_factor, 8)
     bk_tp2   = round(bk_price * tp2_factor, 8)
-
-    # Pullback = 5m EMA20 if available and below entry, else entry × 0.97
-    t = coin.tech
-    pb_ema20 = (t.m5_ema20 if (t and t.m5_ema20 > 0 and t.m5_ema20 < bk_price * 0.999) else 0.0)
-    pb_price = pb_ema20 if pb_ema20 > 0 else round(bk_price * 0.97, 8)
     pb_sl    = round(pb_price * sl_factor,  8)
     pb_tp1   = round(pb_price * tp1_factor, 8)
     pb_tp2   = round(pb_price * tp2_factor, 8)
@@ -2192,9 +2217,9 @@ def _build_coin_keyboard(coin, margin: float, leverage: int) -> "InlineKeyboardM
     ])
 
 
-def send_alert_with_buttons(coin, margin: float = 10.0, leverage: int = 5) -> bool:
+def send_alert_with_buttons(coin, margin: float = 5.0, leverage: int = 5) -> bool:
     """Send any MomentumResult as a unified alert WITH inline keyboard buttons."""
-    text     = build_unified_alert(coin)
+    text     = build_unified_alert(coin, margin, leverage)
     keyboard = _build_coin_keyboard(coin, margin, leverage)
     ok, _    = send_message_with_buttons(text, keyboard)
     return ok
@@ -2202,52 +2227,67 @@ def send_alert_with_buttons(coin, margin: float = 10.0, leverage: int = 5) -> bo
 
 def build_signal_text(info: dict) -> str:
     """
-    Build the SIGNAL alert message body.
+    Build the SIGNAL alert message body — unified format matching build_unified_alert.
     info keys: symbol, price, conds, cond_score, tech, bk_price, bk_sl, bk_tp1, bk_tp2,
                pb_price, pb_sl, pb_tp1, pb_tp2, margin, leverage, position_size,
                profit_tp1, profit_tp2, ath_dist_pct
     """
-    sym        = info["symbol"]
-    conds      = info.get("conds", {})
-    tech       = info.get("tech")
-    score      = info.get("cond_score", 0)
-    margin     = info.get("margin", 10)
-    leverage   = info.get("leverage", 5)
-    pos_size   = info.get("position_size", margin * leverage)
-    p_tp1      = info.get("profit_tp1", 0)
-    p_tp2      = info.get("profit_tp2", 0)
-    ath_dist   = info.get("ath_dist_pct", 0)
+    sym      = info["symbol"]
+    mexc_sym = info.get("mexc_symbol", f"{sym}_USDT")
+    conds    = info.get("conds", {})
+    score    = info.get("cond_score", 0)
+    margin   = info.get("margin", 5)
+    leverage = info.get("leverage", 5)
+    ath_dist = info.get("ath_dist_pct", 0)
 
     def ck(key: str) -> str:
         return "✅" if conds.get(key) else "❌"
 
-    fd  = _fmt_price_dollar
+    s_em    = _score_emoji(min(score * 20, 100))
+    line1   = f"🟢 <b>{sym}</b> — SIGNAL [{score}/5{s_em}]"
 
-    # Auto-sentence
-    tf_ok = [k for k, v in conds.items() if v]
-    tf_str = ", ".join(tf_ok) if tf_ok else "multiple timeframes"
-    s_em = _score_emoji(min(score * 20, 100))
+    # Meta line — MCap/Circ not available in SIGNAL dict, show ATH only
+    meta_line = f"MCap N/A | ATH -{ath_dist:.0f}% | Circ N/A"
 
-    line1    = f"🟢 <b>{sym}</b> — SIGNAL {score}/5{s_em}"
-    sep      = _SEP
-    sentence = f'"{sym} momentum confirmed on {tf_str}. {ath_dist:.0f}% below ATH."'
-    tf_row   = f"3m {ck('3m')} 5m {ck('5m')} 10m ✅ 15m {ck('15m')} 4H {ck('4H')}"
+    # TF status row
+    tf_row = f"3m {ck('3m')}  5m {ck('5m')}  10m ✅  15m {ck('15m')}  4H {ck('4H')}"
+    if _btc_bear_regime:
+        tf_row += "  ⚠️ BEAR"
 
-    bk_block = (
-        f"📊 <b>BREAKOUT</b> {fd(info['bk_price'])}\n"
-        f"   SL {fd(info['bk_sl'])} | TP1 {fd(info['bk_tp1'])} | TP2 {fd(info['bk_tp2'])}\n"
-        f"   TP1 profit: +${p_tp1:.2f} | TP2: +${p_tp2:.2f}"
-    )
-    pb_block = (
-        f"📊 <b>PULLBACK</b> {fd(info['pb_price'])}\n"
-        f"   SL {fd(info['pb_sl'])} | TP1 {fd(info['pb_tp1'])} | TP2 {fd(info['pb_tp2'])}\n"
-        f"   TP1 profit: +${p_tp1:.2f} | TP2: +${p_tp2:.2f}"
-    )
-    margin_line = f"Margin: ${margin:.0f} × {leverage}x = ${pos_size:.0f}"
+    # Tick-size aware price formatter
+    scale = _get_price_scale(mexc_sym)
+    def fp(p: float) -> str:
+        return f"${p:.{scale}f}"
 
-    return "\n".join([
-        line1, sep, sentence, "", tf_row, "", bk_block, "", pb_block, "", margin_line, sep,
-    ])
+    # Levels — sorted high to low
+    pb_price = info["pb_price"]
+    bk_price = info["bk_price"]
+    sl_pct   = 5.0  # standard SL for SIGNAL alerts
+    sl       = pb_price * (1 - sl_pct / 100)
+    tp1      = pb_price * 1.08
+    tp2      = pb_price * 1.15
+    pos_size = margin * leverage
+    profit1  = pos_size * 0.08 * 0.59
+    profit2  = pos_size * 0.15 * 0.41
+    # 24H high from tech if available
+    tech  = info.get("tech")
+    h24h  = (tech.h24_high if (tech and tech.h24_high > 0) else bk_price)
+
+    levels: list[tuple[float, str]] = [
+        (tp2,      f"── TP2  +15% → +${profit2:.2f} (runner)"),
+        (tp1,      f"── TP1  +8%  → +${profit1:.2f} (59% close)"),
+        (h24h,     "── 24H High"),
+        (bk_price, "── Breakout"),
+        (pb_price, "── Pullback  ← best R/R"),
+        (sl,       f"▁▁ SL  -{sl_pct:.0f}%"),
+    ]
+    levels.sort(key=lambda x: x[0], reverse=True)
+    level_lines = [f"{fp(price)} {label}" for price, label in levels]
+
+    lines = [line1, _SEP, meta_line, tf_row, "", "📊 LEVELS"]
+    lines.extend(level_lines)
+    lines.append("")
+    return "\n".join(lines)
 
 
 def send_signal_alert(info: dict) -> tuple[bool, int | None]:

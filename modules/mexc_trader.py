@@ -291,8 +291,8 @@ def check_safety(margin: float) -> tuple[bool, str]:
     positions = get_open_positions()
     if positions is not None and len(positions) >= cfg.MAX_OPEN_POSITIONS:
         return False, (
-            f"⛔ Max {cfg.MAX_OPEN_POSITIONS} positions active. "
-            "Close one before opening a new trade."
+            f"⛔ Max {cfg.MAX_OPEN_POSITIONS} positions active.\n"
+            "Close one before opening new trade."
         )
 
     # Rule 2: daily loss limit
