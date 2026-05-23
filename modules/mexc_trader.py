@@ -59,15 +59,26 @@ def _auth_headers(timestamp: str, body: str) -> dict | None:
 
 def _post(endpoint: str, payload: dict) -> dict | None:
     """Authenticated POST to MEXC Contract API."""
+    key      = cfg.MEXC_API_KEY or ""
     ts       = str(int(time.time() * 1000))
     body_str = json.dumps(payload, separators=(",", ":"))
+    sign_msg = key + ts + body_str
+    log.debug(f"MEXC sign-string: {sign_msg[:200]}")
     headers  = _auth_headers(ts, body_str)
     if headers is None:
         return None
     try:
         resp = requests.post(f"{_BASE}{endpoint}", headers=headers,
                              data=body_str, timeout=10)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            log.error(
+                f"MEXC POST {endpoint} HTTP {resp.status_code} — "
+                f"body: {resp.text[:500]}"
+            )
+            try:
+                return resp.json()   # return body so callers can inspect error message
+            except Exception:
+                return None
         return resp.json()
     except Exception as e:
         log.error(f"MEXC POST {endpoint} failed: {e}")
@@ -156,7 +167,15 @@ def place_futures_order(
     # Sanity-clamp margin
     margin_usdt = max(cfg.MARGIN_MIN_USDT, min(cfg.MARGIN_MAX_USDT, margin_usdt))
 
-    # Step 1 — set leverage
+    # Step 1a — set position mode to One-Way (required by MEXC before orders)
+    pm_resp = _post("/api/v1/private/position/change_margin_mode", {
+        "symbol":     sym,
+        "marginMode": 1,   # 1 = One-Way (hedge = 2)
+    })
+    if pm_resp is not None and not pm_resp.get("success"):
+        log.warning(f"Set position mode for {sym}: {pm_resp.get('message')}")
+
+    # Step 1b — set leverage
     lev_resp = _post("/api/v1/private/position/change_leverage", {
         "symbol":   sym,
         "leverage": leverage,
@@ -183,8 +202,18 @@ def place_futures_order(
     })
 
     if not order_resp or not order_resp.get("success"):
-        err = (order_resp or {}).get("message", "Unknown error")
-        log.error(f"Order submit failed for {sym}: {err}")
+        err  = (order_resp or {}).get("message", "Unknown error")
+        code = (order_resp or {}).get("code", "?")
+        log.error(f"Order submit failed for {sym}: code={code} message={err}")
+        try:
+            from modules.telegram_alerts import send_message as _tg_send
+            _tg_send(
+                f"⚠️ <b>Order failed</b>: {sym}\n"
+                f"Error: <code>{err}</code>  (code {code})\n"
+                f"Check MEXC API key has <b>Futures Trading</b> permission enabled."
+            )
+        except Exception:
+            pass
         return {"error": err, "symbol": sym, "price": price, "quantity": quantity}
 
     order_id = str(order_resp.get("data", ""))

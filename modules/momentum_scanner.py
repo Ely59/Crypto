@@ -1802,7 +1802,7 @@ def scan() -> list[MomentumResult]:
                 tech.macro_ok = True
                 log.info(
                     f"  📈 4H-METHOD-B  {symbol}: "
-                    f"price>{float(close_4h.iloc[-3]) if len(close_4h)>=3 else '?':.4g} (8H ago), "
+                    f"price {price:.4g} rose over 8H, "
                     f"DIF↑, RSI {tech.h4_rsi6:.0f}>42, green candle"
                 )
 
