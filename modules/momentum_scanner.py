@@ -323,6 +323,10 @@ class MomentumResult:
     # Stage 0 pre-breakout watchlist confirmation
     stage0_breakout: bool = False   # True if coin was on S0 watchlist and broke above consolidation high
 
+    # Change 4: leg number + entry validity
+    leg_number:   int  = 1      # 1 = first detection, 2+ = continuation leg
+    entry_valid:  bool = True   # False if price moved too far or alert is too old
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Cooldown — keyed by symbol, 2-hour window
@@ -587,6 +591,34 @@ def _add_to_watchlist(symbol: str, price: float, signal_type: str, leg_number: i
     stale = time.time() - 72 * 3600
     for k in [k for k, v in list(_alert_watchlist.items()) if v.get("alert_time", 0) < stale]:
         del _alert_watchlist[k]
+
+
+def _get_leg_info(symbol: str, price: float, recommendation: str) -> tuple[int, bool]:
+    """
+    Return (leg_number, entry_valid) for a coin about to be alerted.
+    Looks up _alert_watchlist for prior alert state.
+    entry_valid=False if price moved too far or prior alert is too old.
+    """
+    existing = _alert_watchlist.get(symbol)
+    if not existing:
+        return 1, True
+
+    leg = existing.get("leg_number", 1)
+    alert_ts     = existing.get("alert_time", 0.0)
+    prior_price  = existing.get("entry_price", price)
+
+    age_min  = (time.time() - alert_ts) / 60.0
+    moved_pct = abs(price - prior_price) / prior_price * 100.0 if prior_price > 0 else 0.0
+
+    if recommendation == "STRONG ENTRY":
+        threshold = cfg.MOMENTUM_ENTRY_VALID_STRONG_PCT
+    elif recommendation == "WATCH":
+        threshold = cfg.MOMENTUM_ENTRY_VALID_WATCH_PCT
+    else:
+        threshold = cfg.MOMENTUM_ENTRY_VALID_OTHER_PCT
+
+    valid = age_min <= cfg.MOMENTUM_ENTRY_VALID_WINDOW_MIN and moved_pct <= threshold
+    return leg, valid
 
 
 # ── RADAR / SIGNAL cooldowns ──────────────────────────────────────────────────
@@ -2090,6 +2122,11 @@ def scan() -> list[MomentumResult]:
 
         _pi.update({"score": total, "rec": recommendation})
 
+        # Leg number + entry validity (Change 4)
+        _leg_num, _entry_valid = _get_leg_info(symbol, price, recommendation)
+        if not _entry_valid:
+            log.info(f"  ⏰ ENTRY EXPIRED  {symbol}: leg {_leg_num} — price moved too far or >90m")
+
         log.info(
             f"  {rec_emoji} {recommendation}  {symbol}  {total}/100  "
             f"[tech {tech.score}+fund {fund.total}]  "
@@ -2136,6 +2173,8 @@ def scan() -> list[MomentumResult]:
             m5_note          = tech.m5_note,
             squeeze_bypass   = squeeze_bypass,
             stage0_breakout  = (s0_bonus > 0),
+            leg_number       = _leg_num,
+            entry_valid      = _entry_valid,
         ))
 
     # Export per-candidate pass data for /passed and /blocked commands

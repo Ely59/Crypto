@@ -153,6 +153,12 @@ MOMENTUM_S0_BREAKOUT_WINDOW  = 90     # minutes: Stage 0 watchlist entry expires
 MOMENTUM_S0_BREAKOUT_BONUS   = 10     # extra score points when Stage 0 coin breaks out
 MOMENTUM_S0_VOL_BUILD_MIN    = 1.1    # volume building: last 5m vol ≥ 1.1× avg of prior 4
 
+# Change 4: Entry validity window
+MOMENTUM_ENTRY_VALID_WINDOW_MIN    = 90    # minutes: alert considered valid for this long
+MOMENTUM_ENTRY_VALID_STRONG_PCT    = 8.0   # STRONG ENTRY: invalid if price moved > 8% since alert
+MOMENTUM_ENTRY_VALID_WATCH_PCT     = 10.0  # WATCH: invalid if price moved > 10% since alert
+MOMENTUM_ENTRY_VALID_OTHER_PCT     = 12.0  # other types: invalid if price moved > 12% since alert
+
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M standard minimum — micro-cap bypass below
 MOMENTUM_MCAP_MAX_USD        = 5_000_000_000   # $5B maximum market cap

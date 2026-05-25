@@ -597,14 +597,20 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
     circ_warn = ("⚠️ Circ <40% — unlock risk" if (circ_pct > 0 and circ_pct < 40) else "")
 
     # ── Assemble ──────────────────────────────────────────────────────────────
-    _price_line = f"Current price: {fp(coin.price)}" if coin.price > 0 else ""
-    _s0_line    = "🔍 Pre-breakout watchlist confirmed (+10)" if getattr(coin, "stage0_breakout", False) else ""
+    _price_line  = f"Current price: {fp(coin.price)}" if coin.price > 0 else ""
+    _s0_line     = "🔍 Pre-breakout watchlist confirmed (+10)" if getattr(coin, "stage0_breakout", False) else ""
+    _leg_num     = getattr(coin, "leg_number",  1)
+    _entry_valid = getattr(coin, "entry_valid", True)
+    _leg_tag     = f"Leg {_leg_num}" if _leg_num > 1 else "Leg 1 (new signal)"
+    _valid_tag   = "✅ Entry valid" if _entry_valid else "⏰ Entry expired — monitor only"
+    _leg_line    = f"{_leg_tag}  |  {_valid_tag}"
+
     lines: list[str] = []
     if _price_line:
         lines += [_price_line, ""]
     if _s0_line:
         lines += [_s0_line, ""]
-    lines += [line1, _SEP, meta_line, tf_row]
+    lines += [line1, _SEP, meta_line, tf_row, _leg_line]
 
     if rec == "SPEED ALERT":
         lines.append("⚡ FAST MOVE — act within 10 min")
@@ -2333,8 +2339,12 @@ def _build_coin_keyboard(coin, margin: float, leverage: int) -> "InlineKeyboardM
 
 
 def send_alert_with_buttons(coin, margin: float = 5.0, leverage: int = 5) -> bool:
-    """Send any MomentumResult as a unified alert WITH inline keyboard buttons."""
-    text     = build_unified_alert(coin, margin, leverage)
+    """Send any MomentumResult as a unified alert WITH inline keyboard buttons.
+    Suppresses buttons if entry_valid=False — sends text only."""
+    text = build_unified_alert(coin, margin, leverage)
+    if not getattr(coin, "entry_valid", True):
+        ok = send_message(text)
+        return ok
     keyboard = _build_coin_keyboard(coin, margin, leverage)
     ok, _    = send_message_with_buttons(text, keyboard)
     return ok
