@@ -320,6 +320,9 @@ class MomentumResult:
     # Gate 2g — BB-Squeeze bypass flag (CHANGE 2B)
     squeeze_bypass: bool = False
 
+    # Stage 0 pre-breakout watchlist confirmation
+    stage0_breakout: bool = False   # True if coin was on S0 watchlist and broke above consolidation high
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Cooldown — keyed by symbol, 2-hour window
@@ -530,6 +533,10 @@ _cmc_price_cache: dict[str, float] = {}
 
 # /blocked — Method C coins that scored below 70 in last scan
 _last_method_c_blocked: list[dict] = []
+
+# Stage 0 pre-breakout watchlist
+# symbol → {mexc_symbol, consolidation_high, ma10_vol, added_ts, name, mcap, price_at_add}
+_stage0_watchlist: dict[str, dict] = {}
 
 # ── Global per-coin cooldown — CHANGE 5A ─────────────────────────────────────
 # Stores: symbol → (timestamp, rec_type, price_at_alert)
@@ -1610,6 +1617,63 @@ def _check_speed_alert(mexc_symbol: str) -> "dict | None":
     }
 
 
+def _check_stage0(mexc_symbol: str, price: float) -> dict | None:
+    """
+    Stage 0 pre-breakout qualification check.
+    Returns {consolidation_high, ma10_vol, range_pct, rsi5m} or None.
+
+    Conditions (all must pass):
+      - 45m price range ≤ MOMENTUM_S0_RANGE_MAX_PCT (consolidation)
+      - 5m RSI6 in [MOMENTUM_S0_RSI_MIN, MOMENTUM_S0_RSI_MAX] (not overbought/oversold)
+      - Volume building: last 5m vol ≥ MOMENTUM_S0_VOL_BUILD_MIN × avg prior 4
+      - No new 1H low: last candle low > low 12 candles ago
+    """
+    df5m = get_mexc_futures_klines(mexc_symbol, "5m", limit=25)
+    if df5m is None or len(df5m) < 15:
+        return None
+
+    closes = df5m["close"].astype(float)
+    highs  = df5m["high"].astype(float)
+    lows   = df5m["low"].astype(float)
+    vols   = df5m["volume"].astype(float)
+
+    # 45m range: last 9 × 5m candles
+    window_high = float(highs.iloc[-9:].max())
+    window_low  = float(lows.iloc[-9:].min())
+    if window_low <= 0:
+        return None
+    range_pct = (window_high - window_low) / window_low * 100.0
+    if range_pct > cfg.MOMENTUM_S0_RANGE_MAX_PCT:
+        return None
+
+    # 5m RSI6
+    rsi5m = float(compute_rsi(closes, period=6).iloc[-1])
+    if not (cfg.MOMENTUM_S0_RSI_MIN <= rsi5m <= cfg.MOMENTUM_S0_RSI_MAX):
+        return None
+
+    # Volume building: last candle vol vs avg of prior 4
+    if len(vols) < 5:
+        return None
+    vol_last  = float(vols.iloc[-1])
+    vol_prev4 = float(vols.iloc[-5:-1].mean())
+    if vol_prev4 <= 0 or vol_last < cfg.MOMENTUM_S0_VOL_BUILD_MIN * vol_prev4:
+        return None
+
+    # No new 1H low: last low must be above the low 12 candles ago
+    if float(lows.iloc[-1]) <= float(lows.iloc[-13]):
+        return None
+
+    # MA10 volume (baseline for later reference)
+    ma10_vol = float(vols.iloc[-10:].mean()) if len(vols) >= 10 else float(vols.mean())
+
+    return {
+        "consolidation_high": round(window_high, 8),
+        "ma10_vol":           round(ma10_vol, 2),
+        "range_pct":          round(range_pct, 2),
+        "rsi5m":              round(rsi5m, 1),
+    }
+
+
 def scan() -> list[MomentumResult]:
     """
     Run one full momentum scan.
@@ -1641,7 +1705,8 @@ def scan() -> list[MomentumResult]:
     )
 
     # ── Stage 1: M1–M7 (unified candidates — 5m primary architecture) ───────────
-    candidates: list = []   # all coins with 1H ≥ 0.3% passing M2–M7; all pipelines share this
+    candidates: list = []        # coins with 1H ≥ 0.3% passing M2–M7 (standard pipeline)
+    stage0_candidates: list = [] # coins with -0.5% ≤ 1H < 0.3% passing M2–M7 (pre-breakout)
     _inf_supply_map: dict[str, bool] = {}   # symbol → has infinite supply
     _micro_cap_set:  set[str] = set()       # symbols that bypassed via micro-cap Vol/MC rule
 
@@ -1665,8 +1730,8 @@ def scan() -> list[MomentumResult]:
         mcap       = q.get("market_cap")         or 0.0
         vol_24h    = q.get("volume_24h")         or 0.0
 
-        # CMC sorted descending by 1H gain — stop once below the minimum
-        if change_1h < cfg.MOMENTUM_1H_MIN_MOVEMENT:
+        # CMC sorted descending by 1H gain; stop entirely once below Stage 0 floor
+        if change_1h < cfg.MOMENTUM_S0_1H_MIN:
             break
 
         # M2: Market cap (micro-cap bypass: $10M-$25M allowed if Vol/MC > 150%)
@@ -1723,12 +1788,20 @@ def scan() -> list[MomentumResult]:
             symbol, name, matched_tags, mexc_symbol,
             price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct,
         )
-        log.info(
-            f"  M1–M7 ✓  {symbol:<10}  1h {change_1h:+.2f}%  24h {change_24h:+.1f}%  "
-            f"MCap ${mcap/1e6:.0f}M  Vol ${vol_24h/1e6:.0f}M  "
-            f"FDV/MC {fdv_ratio:.1f}×  [{matched_tags[0]}]"
-        )
-        candidates.append(entry_tuple)
+
+        if change_1h >= cfg.MOMENTUM_1H_MIN_MOVEMENT:
+            log.info(
+                f"  M1–M7 ✓  {symbol:<10}  1h {change_1h:+.2f}%  24h {change_24h:+.1f}%  "
+                f"MCap ${mcap/1e6:.0f}M  Vol ${vol_24h/1e6:.0f}M  "
+                f"FDV/MC {fdv_ratio:.1f}×  [{matched_tags[0]}]"
+            )
+            candidates.append(entry_tuple)
+        else:
+            # Stage 0: coin in consolidation (-0.5% ≤ 1H < 0.3%)
+            log.debug(
+                f"  S0 cand  {symbol:<10}  1h {change_1h:+.2f}%  — pre-breakout watchlist candidate"
+            )
+            stage0_candidates.append(entry_tuple)
 
     # Cache CMC data keyed by symbol so Tier 2 can show real name/mcap/circ
     global _cmc_data_cache, _cmc_price_cache
@@ -1755,6 +1828,47 @@ def scan() -> list[MomentumResult]:
     _last_rb_watchlist  = []
     _last_m1m7_count = len(candidates)
     log.info(f"Stage 1: {len(candidates)} unified candidates (1H ≥ {cfg.MOMENTUM_1H_MIN_MOVEMENT}%).")
+
+    # ── Stage 0: pre-breakout watchlist update ────────────────────────────────
+    global _stage0_watchlist
+    _now_ts = time.time()
+
+    # Expire old Stage 0 entries
+    _expired = [sym for sym, entry in _stage0_watchlist.items()
+                if _now_ts - entry["added_ts"] > cfg.MOMENTUM_S0_BREAKOUT_WINDOW * 60]
+    for sym in _expired:
+        del _stage0_watchlist[sym]
+        log.info(f"  S0 expire  {sym}: watchlist entry expired after {cfg.MOMENTUM_S0_BREAKOUT_WINDOW}m")
+
+    # Check new Stage 0 candidates — skip if already in standard pipeline or watchlist
+    _s0_added = 0
+    for entry in stage0_candidates:
+        (symbol, name, matched_tags, mexc_symbol,
+         price, change_1h, change_24h, mcap, vol_24h, fdv, fdv_ratio, circ_pct) = entry
+        if symbol in _stage0_watchlist:
+            continue   # already watching
+        s0 = _check_stage0(mexc_symbol, price)
+        if s0 is None:
+            continue
+        _stage0_watchlist[symbol] = {
+            "mexc_symbol":        mexc_symbol,
+            "consolidation_high": s0["consolidation_high"],
+            "ma10_vol":           s0["ma10_vol"],
+            "added_ts":           _now_ts,
+            "name":               name,
+            "mcap":               mcap,
+            "price_at_add":       price,
+            "range_pct":          s0["range_pct"],
+            "rsi5m":              s0["rsi5m"],
+        }
+        _s0_added += 1
+        log.info(
+            f"  S0 watch   {symbol}: range {s0['range_pct']:.1f}%  RSI {s0['rsi5m']:.0f}  "
+            f"high ${s0['consolidation_high']:.6g}  MA10vol {s0['ma10_vol']:.0f}"
+        )
+
+    if _s0_added or _expired:
+        log.info(f"Stage 0: +{_s0_added} added, {len(_expired)} expired → {len(_stage0_watchlist)} on watchlist.")
 
     # ── 5m pre-fetch: cache for all candidates before Stage 2 ─────────────────
     _m5_cache: dict[str, "dict | None"] = {}
@@ -1922,10 +2036,23 @@ def scan() -> list[MomentumResult]:
         _pi["ath_dist_pct"] = real_ath_dist
         ath_pts = _ath_score(real_ath_dist)
 
-        # Total score: 15m tech + fundamentals + ATH bonus + 4H score factor + 1H score
+        # Stage 0 breakout bonus: coin was pre-identified in consolidation watchlist
+        _s0_entry = _stage0_watchlist.get(symbol)
+        s0_bonus = 0
+        if _s0_entry and price > _s0_entry["consolidation_high"]:
+            age_min = (_now_ts - _s0_entry["added_ts"]) / 60.0
+            if age_min <= cfg.MOMENTUM_S0_BREAKOUT_WINDOW:
+                s0_bonus = cfg.MOMENTUM_S0_BREAKOUT_BONUS
+                log.info(
+                    f"  S0 BREAK   {symbol}: +{s0_bonus}pts  "
+                    f"(above ${_s0_entry['consolidation_high']:.6g}, {age_min:.0f}m ago)"
+                )
+
+        # Total score: 15m tech + fundamentals + ATH bonus + 4H score factor + 1H score + S0 bonus
         # 4H: +20 fully bullish / +8 partial / -10 bearish / 0 neutral (no hard gate)
         # 1H: +10 bullish / +5 neutral-bullish / 0 weak
-        total = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score
+        # S0: +10 if coin was on pre-breakout watchlist and just broke above consolidation high
+        total = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score + s0_bonus
         total = max(0, min(100, total))
 
         # Recommendation classification
@@ -2006,8 +2133,9 @@ def scan() -> list[MomentumResult]:
             ath_dist_pct    = real_ath_dist,
             ath_price       = real_ath_price,
             ath_date        = real_ath_date,
-            m5_note         = tech.m5_note,
-            squeeze_bypass  = squeeze_bypass,
+            m5_note          = tech.m5_note,
+            squeeze_bypass   = squeeze_bypass,
+            stage0_breakout  = (s0_bonus > 0),
         ))
 
     # Export per-candidate pass data for /passed and /blocked commands

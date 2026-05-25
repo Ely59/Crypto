@@ -143,6 +143,15 @@ MOMENTUM_ZONE_MIN            = 1.0    # kept for scoring reference only — no l
 MOMENTUM_ZONE_MAX            = 15.0   # kept for scoring reference only — no longer a Stage 1 gate
 MOMENTUM_1H_MIN_MOVEMENT     = 0.3    # Stage 1 break: CMC loop stops when 1H < 0.3%
 MOMENTUM_EARLY_EXIT_PCT      = 0.3    # alias — same as MOMENTUM_1H_MIN_MOVEMENT (legacy compat)
+MOMENTUM_S0_1H_MIN           = -0.5   # Stage 0: include coins down to -0.5% 1H (pre-breakout consolidation)
+
+# Stage 0 pre-breakout watchlist
+MOMENTUM_S0_RANGE_MAX_PCT    = 3.0    # max 45m price range to qualify as "in consolidation"
+MOMENTUM_S0_RSI_MIN          = 42.0   # 5m RSI6 lower bound for Stage 0 candidates
+MOMENTUM_S0_RSI_MAX          = 68.0   # 5m RSI6 upper bound for Stage 0 candidates
+MOMENTUM_S0_BREAKOUT_WINDOW  = 90     # minutes: Stage 0 watchlist entry expires after this
+MOMENTUM_S0_BREAKOUT_BONUS   = 10     # extra score points when Stage 0 coin breaks out
+MOMENTUM_S0_VOL_BUILD_MIN    = 1.1    # volume building: last 5m vol ≥ 1.1× avg of prior 4
 
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M standard minimum — micro-cap bypass below

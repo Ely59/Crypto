@@ -598,9 +598,12 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
 
     # ── Assemble ──────────────────────────────────────────────────────────────
     _price_line = f"Current price: {fp(coin.price)}" if coin.price > 0 else ""
+    _s0_line    = "🔍 Pre-breakout watchlist confirmed (+10)" if getattr(coin, "stage0_breakout", False) else ""
     lines: list[str] = []
     if _price_line:
         lines += [_price_line, ""]
+    if _s0_line:
+        lines += [_s0_line, ""]
     lines += [line1, _SEP, meta_line, tf_row]
 
     if rec == "SPEED ALERT":
