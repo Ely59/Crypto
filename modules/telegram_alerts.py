@@ -605,11 +605,19 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
     _valid_tag   = "✅ Entry valid" if _entry_valid else "⏰ Entry expired — monitor only"
     _leg_line    = f"{_leg_tag}  |  {_valid_tag}"
 
+    _pat_type  = getattr(coin, "pattern_type",  "")
+    _pat_bonus = getattr(coin, "pattern_bonus", 0)
+    _pat_icons = {"EXPLOSION": "💥", "BREAKOUT": "🚀", "GRIND": "📈"}
+    _pat_line  = (f"{_pat_icons.get(_pat_type, '🔎')} Pattern: <b>{_pat_type}</b> (+{_pat_bonus}pts)"
+                  if _pat_type else "")
+
     lines: list[str] = []
     if _price_line:
         lines += [_price_line, ""]
     if _s0_line:
         lines += [_s0_line, ""]
+    if _pat_line:
+        lines += [_pat_line, ""]
     lines += [line1, _SEP, meta_line, tf_row, _leg_line]
 
     if rec == "SPEED ALERT":

@@ -327,6 +327,10 @@ class MomentumResult:
     leg_number:   int  = 1      # 1 = first detection, 2+ = continuation leg
     entry_valid:  bool = True   # False if price moved too far or alert is too old
 
+    # Change 5: pattern type
+    pattern_type:  str = ""   # "EXPLOSION" | "BREAKOUT" | "GRIND" | ""
+    pattern_bonus: int = 0    # score pts added for detected pattern
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Cooldown — keyed by symbol, 2-hour window
@@ -619,6 +623,60 @@ def _get_leg_info(symbol: str, price: float, recommendation: str) -> tuple[int, 
 
     valid = age_min <= cfg.MOMENTUM_ENTRY_VALID_WINDOW_MIN and moved_pct <= threshold
     return leg, valid
+
+
+def _detect_pattern(mexc_symbol: str, stage0_breakout: bool) -> tuple[str, int]:
+    """
+    Detect one of three pattern types from 5m kline data.
+    Returns (pattern_type, bonus_pts).
+
+    Priority: EXPLOSION > BREAKOUT > GRIND (first match wins).
+    """
+    df5m = get_mexc_futures_klines(mexc_symbol, "5m", limit=20)
+    if df5m is None or len(df5m) < 10:
+        return "", 0
+
+    closes = df5m["close"].astype(float)
+    opens  = df5m["open"].astype(float)
+    highs  = df5m["high"].astype(float)
+    vols   = df5m["volume"].astype(float)
+
+    # EXPLOSION: last candle vol ≥ 3.5× avg prior 4 AND candle body ≥ 2%
+    vol_last  = float(vols.iloc[-1])
+    vol_prev4 = float(vols.iloc[-5:-1].mean()) if len(vols) >= 5 else vol_last
+    candle_move = (float(closes.iloc[-1]) - float(opens.iloc[-1])) / float(opens.iloc[-1]) * 100.0 \
+                  if float(opens.iloc[-1]) > 0 else 0.0
+    if (vol_prev4 > 0 and vol_last >= cfg.MOMENTUM_PAT_EXPLOSION_VOL_MULT * vol_prev4
+            and candle_move >= cfg.MOMENTUM_PAT_EXPLOSION_MOVE_PCT):
+        return "EXPLOSION", cfg.MOMENTUM_PAT_EXPLOSION_BONUS
+
+    # BREAKOUT: prior 9-candle range ≤ 4% then last close above prior range high
+    prior_high = float(highs.iloc[-10:-1].max())
+    prior_low  = float(df5m["low"].astype(float).iloc[-10:-1].min())
+    if prior_low > 0:
+        prior_range = (prior_high - prior_low) / prior_low * 100.0
+        last_close  = float(closes.iloc[-1])
+        if prior_range <= cfg.MOMENTUM_PAT_BREAKOUT_RANGE_MAX and last_close > prior_high:
+            bonus = (cfg.MOMENTUM_PAT_BREAKOUT_S0_BONUS if stage0_breakout
+                     else cfg.MOMENTUM_PAT_BREAKOUT_BONUS)
+            return "BREAKOUT", bonus
+
+    # GRIND: N+ consecutive green 5m candles above EMA20
+    n = cfg.MOMENTUM_PAT_GRIND_CANDLES
+    if len(closes) >= n + 5:
+        ema20 = float(closes.ewm(span=20, adjust=False).mean().iloc[-1])
+        consecutive = 0
+        for i in range(1, n + 2):
+            c = float(closes.iloc[-i])
+            o = float(opens.iloc[-i])
+            if c > o and c > ema20:
+                consecutive += 1
+            else:
+                break
+        if consecutive >= n:
+            return "GRIND", cfg.MOMENTUM_PAT_GRIND_BONUS
+
+    return "", 0
 
 
 # ── RADAR / SIGNAL cooldowns ──────────────────────────────────────────────────
@@ -2080,11 +2138,17 @@ def scan() -> list[MomentumResult]:
                     f"(above ${_s0_entry['consolidation_high']:.6g}, {age_min:.0f}m ago)"
                 )
 
-        # Total score: 15m tech + fundamentals + ATH bonus + 4H score factor + 1H score + S0 bonus
+        # Pattern detection (Change 5): EXPLOSION / BREAKOUT / GRIND
+        _pat_type, _pat_bonus = _detect_pattern(mexc_symbol, s0_bonus > 0)
+        if _pat_type:
+            log.info(f"  🔎 PATTERN  {symbol}: {_pat_type} +{_pat_bonus}pts")
+
+        # Total score: 15m tech + fundamentals + ATH bonus + 4H score factor + 1H score + S0 bonus + pattern
         # 4H: +20 fully bullish / +8 partial / -10 bearish / 0 neutral (no hard gate)
         # 1H: +10 bullish / +5 neutral-bullish / 0 weak
         # S0: +10 if coin was on pre-breakout watchlist and just broke above consolidation high
-        total = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score + s0_bonus
+        # Pattern: +5 GRIND / +10-20 BREAKOUT / +15 EXPLOSION
+        total = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score + s0_bonus + _pat_bonus
         total = max(0, min(100, total))
 
         # Recommendation classification
@@ -2175,6 +2239,8 @@ def scan() -> list[MomentumResult]:
             stage0_breakout  = (s0_bonus > 0),
             leg_number       = _leg_num,
             entry_valid      = _entry_valid,
+            pattern_type     = _pat_type,
+            pattern_bonus    = _pat_bonus,
         ))
 
     # Export per-candidate pass data for /passed and /blocked commands

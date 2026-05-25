@@ -159,6 +159,16 @@ MOMENTUM_ENTRY_VALID_STRONG_PCT    = 8.0   # STRONG ENTRY: invalid if price move
 MOMENTUM_ENTRY_VALID_WATCH_PCT     = 10.0  # WATCH: invalid if price moved > 10% since alert
 MOMENTUM_ENTRY_VALID_OTHER_PCT     = 12.0  # other types: invalid if price moved > 12% since alert
 
+# Change 5: Pattern type labels
+MOMENTUM_PAT_EXPLOSION_VOL_MULT    = 3.5   # EXPLOSION: last 5m candle vol ≥ 3.5× avg prior 4
+MOMENTUM_PAT_EXPLOSION_MOVE_PCT    = 2.0   # EXPLOSION: candle body ≥ 2% gain
+MOMENTUM_PAT_EXPLOSION_BONUS       = 15    # EXPLOSION score bonus
+MOMENTUM_PAT_BREAKOUT_RANGE_MAX    = 4.0   # BREAKOUT: prior range ≤ 4% (then vol spike above high)
+MOMENTUM_PAT_BREAKOUT_BONUS        = 10    # BREAKOUT score bonus (standard)
+MOMENTUM_PAT_BREAKOUT_S0_BONUS     = 20    # BREAKOUT from Stage 0 watchlist score bonus
+MOMENTUM_PAT_GRIND_CANDLES         = 4     # GRIND: minimum consecutive green 5m candles above EMA20
+MOMENTUM_PAT_GRIND_BONUS           = 5     # GRIND score bonus
+
 # Market-cap & liquidity filters
 MOMENTUM_MCAP_MIN_USD        = 25_000_000      # $25M standard minimum — micro-cap bypass below
 MOMENTUM_MCAP_MAX_USD        = 5_000_000_000   # $5B maximum market cap
