@@ -240,6 +240,14 @@ class TechResult:
     # 4H Fear Mode Method C: EMA6 within 1.5% below EMA20, 4H rising, RSI > 35
     h4_method_c:          bool  = False
 
+    # 4H score factor (replaces hard gate): +20 full / +8 partial / -10 bearish / 0 neutral
+    h4_score:   int  = 0
+    h4_status:  str  = ""   # "FULL" | "PARTIAL" | "BEARISH" | "NEUTRAL"
+
+    # 1H directional score: +10 bullish / +5 neutral-bullish / 0 weak
+    h1_score:   int  = 0
+    h1_status:  str  = ""   # "BULLISH" | "NEUTRAL" | "WEAK" | "UNKNOWN"
+
 
 @dataclass
 class FundResult:
@@ -972,19 +980,43 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
     h4_kdj_j  = float(j4h.iloc[-1])
     h4_kdj_ok = h4_kdj_j < cfg.MOMENTUM_TA_H4_KDJ_J_MAX   # informational only — no longer a hard gate
 
-    # FIX 4: KDJ is a warning, not a blocker — only EMA stack gates entry
-    macro_ok = h4_ema_ok
+    # KDJ is a warning, not a blocker — only EMA stack scores
+    macro_ok = h4_ema_ok   # kept for legacy display compatibility
 
-    # Method C: Fear Mode transitioning bypass conditions (evaluated here; bypass decision in scan())
-    # EMA6 within 1.5% below EMA20 + 4H price rising + RSI > 35 — only relevant when EMA bearish
+    # Method C: kept for backwards-compat with alert display fields
     _mc_ema_gap = (h4_ema20 - h4_ema6) / h4_ema20 if h4_ema20 > 0 else 1.0
     _mc_rising  = len(close_4h) >= 3 and float(close_4h.iloc[-1]) > float(close_4h.iloc[-3])
     h4_method_c = (
         not h4_ema_ok and
-        _mc_ema_gap < 0.015 and  # EMA6 within 1.5% below EMA20
-        _mc_rising and            # 4H price higher than 2 candles ago
-        h4_rsi6 > 35             # not deeply oversold
+        _mc_ema_gap < 0.015 and
+        _mc_rising and
+        h4_rsi6 > 35
     )
+
+    # ── 4H Score factor (replaces hard gate) ─────────────────────────────────
+    if h4_ema_ok:                    # EMA6 > EMA12 > EMA20 AND sep ≥ 0.2%
+        h4_score, h4_status = 20, "FULL"
+    elif h4_ema6 > h4_ema20:        # EMA6 above EMA20 but not fully stacked
+        h4_score, h4_status = 8, "PARTIAL"
+    elif h4_ema6 < h4_ema20:        # EMA6 below EMA20 — bearish
+        h4_score, h4_status = -10, "BEARISH"
+    else:
+        h4_score, h4_status = 0, "NEUTRAL"
+
+    # ── 1H directional score ─────────────────────────────────────────────────
+    h1_score, h1_status = 0, "UNKNOWN"
+    df_1h = get_mexc_futures_klines(mexc_symbol, "1h", limit=30)
+    if df_1h is not None and len(df_1h) >= 10:
+        close_1h = df_1h["close"]
+        h1_ema6  = float(compute_ema(close_1h, 6).iloc[-1])
+        h1_ema20 = float(compute_ema(close_1h, 20).iloc[-1])
+        h1_rsi6  = float(compute_rsi(close_1h, period=6).iloc[-1])
+        if h1_ema6 > h1_ema20 and h1_rsi6 > 50:
+            h1_score, h1_status = 10, "BULLISH"
+        elif h1_rsi6 > 48:
+            h1_score, h1_status = 5, "NEUTRAL"
+        else:
+            h1_score, h1_status = 0, "WEAK"
 
     # ── 4H Volume ────────────────────────────────────────────────────────────
     vol_last = float(df_4h["volume"].iloc[-1])
@@ -1093,6 +1125,10 @@ def _check_technicals(mexc_symbol: str, vol_threshold: float = cfg.MOMENTUM_TA_V
         h4_compression_days=h4_compression_days,
         h4_method_b=h4_method_b,
         h4_method_c=h4_method_c,
+        h4_score=h4_score,
+        h4_status=h4_status,
+        h1_score=h1_score,
+        h1_status=h1_status,
     )
 
 
@@ -1794,114 +1830,40 @@ def scan() -> list[MomentumResult]:
 
         squeeze_bypass = False
 
-        # ── Gate 2g: BB-Squeeze Bypass — runs BEFORE Stage 2a (CHANGE 2B) ─────
-        if not tech.macro_ok:
-            ema_spread_pct = abs(tech.h4_ema_sep)       # tech.h4_ema_sep stored as % value
-            ema6_gt_ema20  = tech.h4_ema6 > tech.h4_ema20
-            slope_flat     = abs(tech.h4_ema20_slope) < cfg.MOMENTUM_SQUEEZE_EMA_SLOPE_MAX
-            vol_breakout   = tech.m15_vol_spike_ratio >= cfg.MOMENTUM_SQUEEZE_VOL_MULT
-            px_breakout    = tech.m15_price_gt_h4_ema20
-            compressed     = ema_spread_pct < cfg.MOMENTUM_SQUEEZE_EMA_SPREAD_MAX
+        # ── Squeeze Breakout detection (4H gate removed — runs unconditionally) ─
+        ema_spread_pct = abs(tech.h4_ema_sep)
+        ema6_gt_ema20  = tech.h4_ema6 > tech.h4_ema20
+        slope_flat     = abs(tech.h4_ema20_slope) < cfg.MOMENTUM_SQUEEZE_EMA_SLOPE_MAX
+        vol_breakout   = tech.m15_vol_spike_ratio >= cfg.MOMENTUM_SQUEEZE_VOL_MULT
+        px_breakout    = tech.m15_price_gt_h4_ema20
+        compressed     = ema_spread_pct < cfg.MOMENTUM_SQUEEZE_EMA_SPREAD_MAX
+        if compressed and slope_flat and vol_breakout and px_breakout and ema6_gt_ema20:
+            squeeze_bypass = True
+            _s2a_squeeze  += 1
+            log.info(
+                f"  💥 SQUEEZE  {symbol}: spread {ema_spread_pct:.2f}%  "
+                f"slope {tech.h4_ema20_slope:+.2f}%  vol {tech.m15_vol_spike_ratio:.1f}×  "
+                f"px_above_h4ema20={px_breakout}"
+            )
+            sq_rsi_ok = cfg.MOMENTUM_SQ_15M_RSI_MIN <= tech.m15_rsi6 <= cfg.MOMENTUM_SQ_15M_RSI_MAX
+            sq_1h_ok  = cfg.MOMENTUM_SQ_1H_MIN <= change_1h <= cfg.MOMENTUM_SQ_1H_MAX
+            if sq_rsi_ok and sq_1h_ok:
+                has_inf_now  = _inf_supply_map.get(symbol, False)
+                _sq_ath_dist, _sq_ath_price, _sq_ath_date = _lookup_ath(
+                    _ath_map, symbol, price, tech.ath_dist_pct)
+                sq_score = (_score_squeeze(tech, mcap, circ_pct, has_inf_now)
+                            + _ath_score(_sq_ath_dist))
+                if sq_score >= cfg.MOMENTUM_SQ_MIN_SCORE:
+                    sq_pending.append((entry, tech, sq_score,
+                                       _sq_ath_dist, _sq_ath_price, _sq_ath_date))
+                    log.debug(f"  💥 SQ stash  {symbol}: score {sq_score} RSI {tech.m15_rsi6:.1f}")
 
-            if compressed and slope_flat and vol_breakout and px_breakout and ema6_gt_ema20:
-                squeeze_bypass = True
-                tech.macro_ok  = True
-                _s2a_squeeze  += 1
-                _pi["h4_ok"]   = True
-                log.info(
-                    f"  💥 SQUEEZE 2g  {symbol}: spread {ema_spread_pct:.2f}%  "
-                    f"slope {tech.h4_ema20_slope:+.2f}%  vol {tech.m15_vol_spike_ratio:.1f}×  "
-                    f"px_above_h4ema20={px_breakout} — bypassing Stage 2a"
-                )
-                # Stash as SQUEEZE BREAKOUT candidate (PART 3) — evaluated after main pipeline
-                sq_rsi_ok = cfg.MOMENTUM_SQ_15M_RSI_MIN <= tech.m15_rsi6 <= cfg.MOMENTUM_SQ_15M_RSI_MAX
-                sq_1h_ok  = cfg.MOMENTUM_SQ_1H_MIN <= change_1h <= cfg.MOMENTUM_SQ_1H_MAX
-                if sq_rsi_ok and sq_1h_ok:
-                    has_inf_now  = _inf_supply_map.get(symbol, False)
-                    _sq_ath_dist, _sq_ath_price, _sq_ath_date = _lookup_ath(
-                        _ath_map, symbol, price, tech.ath_dist_pct)
-                    sq_score = (_score_squeeze(tech, mcap, circ_pct, has_inf_now)
-                                + _ath_score(_sq_ath_dist))
-                    if sq_score >= cfg.MOMENTUM_SQ_MIN_SCORE:
-                        sq_pending.append((entry, tech, sq_score,
-                                           _sq_ath_dist, _sq_ath_price, _sq_ath_date))
-                        log.debug(f"  💥 SQ stash  {symbol}: score {sq_score} RSI {tech.m15_rsi6:.1f}")
-
-        # ── Stage 2a: 4H macro gate (EMA stack + separation) ──────────────────
-        if not tech.macro_ok:
-            h4_order_ok  = tech.h4_ema6 > tech.h4_ema12 > tech.h4_ema20
-            h4_ema6_gt20 = tech.h4_ema6 > tech.h4_ema20
-
-            # CHANGE 2A: Fear Mode relaxation (F&G < 45)
-            if _fear_mode:
-                fear_sep_ok = h4_order_ok and (tech.h4_ema_sep >= cfg.MOMENTUM_FEAR_EMA_SEP_MIN)
-                rs_vs_btc   = change_24h - _btc_24h_change
-                rs_bypass   = h4_ema6_gt20 and rs_vs_btc >= cfg.MOMENTUM_FEAR_RS_PCT
-                if fear_sep_ok or rs_bypass:
-                    tech.macro_ok = True
-                    _s2a_fear_bypassed += 1
-                    _pi["h4_ok"] = True
-                    reason = (f"sep {tech.h4_ema_sep:.3f}% ≥ {cfg.MOMENTUM_FEAR_EMA_SEP_MIN}%"
-                              if fear_sep_ok else f"RS vs BTC {rs_vs_btc:+.1f}%")
-                    log.info(f"  😟 FEAR bypass  {symbol}: {reason}")
-
-            # Method B: 4H momentum bypass (price>8H + DIF rising + RSI>42 + green candle)
-            if not tech.macro_ok and tech.h4_method_b:
-                tech.macro_ok = True
-                _pi["h4_ok"]  = True
-                log.info(
-                    f"  📈 4H-METHOD-B  {symbol}: "
-                    f"price {price:.4g} rose over 8H, "
-                    f"DIF↑, RSI {tech.h4_rsi6:.0f}>42, green candle"
-                )
-
-            # 4H Transition Mode: EMA6 above both EMA12 and EMA20 + 24H positive
-            if not tech.macro_ok and h4_ema6_gt20 and tech.h4_ema6 > tech.h4_ema12 and change_24h > 0:
-                tech.macro_ok = True
-                tech.h4_transitioning = True
-                _pi["h4_ok"]  = True
-                log.info(f"  🔄 TRANSITION bypass  {symbol}: EMA6 > EMA12/EMA20 partial, 24H {change_24h:+.1f}%")
-
-            # Method C: Fear Mode EMA6 within 1.5% below EMA20, 4H rising, RSI > 35
-            if not tech.macro_ok and _fear_mode and _fg_value < 40 and tech.h4_method_c:
-                tech.macro_ok = True
-                tech.h4_transitioning = True  # triggers 🔄 in alert display
-                _pi["h4_ok"]  = True
-                log.info(
-                    f"  🔄 METHOD-C  {symbol}: EMA6 within 1.5% below EMA20, "
-                    f"4H price rising, RSI {tech.h4_rsi6:.0f}>35 — Fear Mode bypass"
-                )
-
-            if not tech.macro_ok:
-                macro_blocked_count += 1
-                if not h4_order_ok:
-                    _s2a_ema_bearish += 1
-                    _ema_gap_pct = (tech.h4_ema20 - tech.h4_ema6) / tech.h4_ema20 * 100.0 if tech.h4_ema20 > 0 else 0.0
-                    _blk_detail  = f"EMA bearish (6<20 by {_ema_gap_pct:.1f}%)"
-                    log.info(
-                        f"  MACRO ✗  {symbol}: EMA bearish  "
-                        f"({tech.h4_ema6:.4g}/{tech.h4_ema12:.4g}/{tech.h4_ema20:.4g})"
-                    )
-                    _last_scan_outcomes.append(CandidateOutcome(
-                        symbol, change_1h, 0, "MACRO_BLOCKED", _blk_detail,
-                        tech.vol_pct, tech.h4_kdj_j))
-                    _pi.update({"rec": "MACRO_BLOCKED", "detail": _blk_detail})
-                else:
-                    _s2a_sep_small += 1
-                    _fear_sfx   = " in fear mode" if _fear_mode else ""
-                    _blk_detail = f"EMA sep {tech.h4_ema_sep:.3f}% < 0.2%{_fear_sfx}"
-                    log.info(
-                        f"  MACRO ✗  {symbol}: EMA sep {tech.h4_ema_sep:.3f}% "
-                        f"< {cfg.MOMENTUM_TA_H4_EMA_SEP_MIN * 100:.1f}%"
-                    )
-                    _last_scan_outcomes.append(CandidateOutcome(
-                        symbol, change_1h, 0, "MACRO_BLOCKED", _blk_detail,
-                        tech.vol_pct, tech.h4_kdj_j))
-                    _pi.update({"rec": "MACRO_BLOCKED", "detail": _blk_detail})
-                continue
-
-        # Coins reaching here have cleared the 4H gate (natively or via bypass)
-        _pi["h4_ok"] = True
+        # 4H is now a score factor — log status and track for /passed display
+        _pi["h4_ok"] = tech.h4_status in ("FULL", "PARTIAL")
+        log.info(
+            f"  4H [{tech.h4_status}] {symbol}: score {tech.h4_score:+d}  "
+            f"1H [{tech.h1_status}]: score {tech.h1_score:+d}"
+        )
 
         # ── GATE 2a: 15m EMA6 > EMA12 (hard gate) ─────────────────────────────
         if not tech.m15_ema6_gt_ema12 and not squeeze_bypass:
@@ -1960,29 +1922,11 @@ def scan() -> list[MomentumResult]:
         _pi["ath_dist_pct"] = real_ath_dist
         ath_pts = _ath_score(real_ath_dist)
 
-        # Total score
-        total = tech.score + fund.total + ath_pts
-
-        # 4H Transition penalty: Method C (Fear Mode bypass) gets -8 + min score 70;
-        # regular transition gets -5 pts for incomplete EMA stack
-        if tech.h4_transitioning and tech.h4_method_c:
-            total = max(0, total - 8)
-            if total < 70:
-                _mc_detail = f"Method C: score {total}/100 < 70 required"
-                _mc_blocked_scan.append({"symbol": symbol, "score": total, "detail": _mc_detail})
-                _last_scan_outcomes.append(CandidateOutcome(
-                    symbol, change_1h, total, "BELOW_THRESHOLD", _mc_detail, tech.vol_pct, tech.h4_kdj_j))
-                _pi.update({"score": total, "rec": "METHOD_C_BLOCKED", "detail": _mc_detail})
-                continue
-        elif tech.h4_transitioning:
-            total = max(0, total - 5)
-
-        # Method B penalty: -3 pts (alternative 4H gate, less confirmation than full EMA stack)
-        if tech.h4_method_b and not tech.h4_ema_ok and not tech.h4_transitioning:
-            total = max(0, total - 3)
-
-        # Hard cap: score never exceeds 100
-        total = min(100, total)
+        # Total score: 15m tech + fundamentals + ATH bonus + 4H score factor + 1H score
+        # 4H: +20 fully bullish / +8 partial / -10 bearish / 0 neutral (no hard gate)
+        # 1H: +10 bullish / +5 neutral-bullish / 0 weak
+        total = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score
+        total = max(0, min(100, total))
 
         # Recommendation classification
         if total >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:

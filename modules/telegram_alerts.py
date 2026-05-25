@@ -546,12 +546,15 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
     else:
         m5_ok = False
     m15_ok = bool(t and t.m15_ema6_gt_ema12 and t.m15_rsi6 < 78)
-    h4_ok  = bool(t and (t.h4_ema_ok or getattr(t, 'h4_transitioning', False)
-                         or getattr(t, 'h4_method_b', False)))
-    h4_method_c_flag = bool(t and getattr(t, 'h4_method_c', False) and not getattr(t, 'h4_ema_ok', False))
-    h4_display = "🔄" if h4_method_c_flag else ck(h4_ok)
 
-    tf_row = f"5m {ck(m5_ok)}  15m {ck(m15_ok)}  4H {h4_display}"
+    # 4H/1H shown as INFO only — not a gate
+    _h4_status = getattr(t, 'h4_status', '') if t else ''
+    _h1_status = getattr(t, 'h1_status', '') if t else ''
+    _h4_emoji  = {"FULL": "✅", "PARTIAL": "🟡", "BEARISH": "🔴"}.get(_h4_status, "⬜")
+    _h1_emoji  = {"BULLISH": "✅", "NEUTRAL": "🟡", "WEAK": "🔴"}.get(_h1_status, "⬜")
+    _h4_note   = " (info)" if _h4_status not in ("FULL", "") else ""
+
+    tf_row = f"5m {ck(m5_ok)}  15m {ck(m15_ok)}  1H {_h1_emoji}  4H {_h4_emoji}{_h4_note}"
     if _btc_bear_regime:
         tf_row += "  ⚠️ BEAR"
 
@@ -594,7 +597,11 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
     circ_warn = ("⚠️ Circ <40% — unlock risk" if (circ_pct > 0 and circ_pct < 40) else "")
 
     # ── Assemble ──────────────────────────────────────────────────────────────
-    lines: list[str] = [line1, _SEP, meta_line, tf_row]
+    _price_line = f"Current price: {fp(coin.price)}" if coin.price > 0 else ""
+    lines: list[str] = []
+    if _price_line:
+        lines += [_price_line, ""]
+    lines += [line1, _SEP, meta_line, tf_row]
 
     if rec == "SPEED ALERT":
         lines.append("⚡ FAST MOVE — act within 10 min")
