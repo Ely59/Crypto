@@ -312,13 +312,13 @@ def get_coingecko_global() -> Optional[dict]:
     CoinGecko /global — BTC dominance, total market cap, Total3, 24h market change.
     Returns the raw 'data' dict, or None on failure. Safe to call once per day.
     """
-    try:
-        resp = requests.get(f"{COINGECKO_BASE_URL}/global", timeout=10)
-        resp.raise_for_status()
-        return resp.json().get("data")
-    except Exception as e:
-        log.warning(f"CoinGecko /global fetch failed: {e}")
+    data = _get(f"{COINGECKO_BASE_URL}/global")
+    if data is None:
+        log.warning("CoinGecko /global fetch failed — BTC.D and Total3 will show N/A")
         return None
+    if isinstance(data, dict):
+        return data.get("data")
+    return None
 
 
 def get_coingecko_ath_map(limit: int = 500) -> dict:
@@ -366,17 +366,14 @@ def get_btc_funding_rate() -> Optional[float]:
     Positive  → longs paying shorts (bearish pressure on price).
     Negative  → shorts paying longs (bullish pressure on price).
     """
-    try:
-        resp = requests.get(
-            f"{MEXC_CONTRACT_BASE_URL}/api/v1/contract/funding_rate/BTCUSDT",
-            timeout=5,
-        )
-        data = resp.json()
-        rate = (data.get("data") or {}).get("fundingRate")
-        if rate is not None:
-            return float(rate)
-    except Exception as e:
-        log.error(f"MEXC funding rate fetch failed: {e}")
+    data = _get(f"{MEXC_CONTRACT_BASE_URL}/api/v1/contract/funding_rate/BTC_USDT")
+    if data is None:
+        log.error("MEXC funding rate fetch failed — response empty")
+        return None
+    rate = (data.get("data") or {}).get("fundingRate")
+    if rate is not None:
+        return float(rate)
+    log.error(f"MEXC funding rate: unexpected response structure: {data}")
     return None
 
 
