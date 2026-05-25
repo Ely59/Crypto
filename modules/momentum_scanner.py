@@ -3353,26 +3353,27 @@ def scan_tier3() -> list[MomentumResult]:
                 leg_high = price
             continue
 
-        # (2) Fresh 5m EMA cross
+        # (2) Volume dried up: 5m vol < 70% of MA10 (consolidation, not chasing)
+        if m5.get("vol_pct", 100.0) >= 70.0:
+            continue
+
+        # (3) Fresh 5m EMA cross: EMA6 just crossed above EMA20
         if not m5.get("fresh_cross", False):
             continue
 
-        # (3) 5m vol ≥1.5× MA10
-        if m5.get("vol_pct", 0.0) < 150.0:
+        # (4) RSI reset from overbought: was >70 recently AND now rising from below 58
+        _df5_leg = get_mexc_futures_klines(mexc_symbol, "5m", limit=15)
+        _rsi_ok = False
+        if _df5_leg is not None and len(_df5_leg) >= 10:
+            _rsi_s     = compute_rsi(_df5_leg["close"].astype(float), period=6)
+            _rsi_now   = float(_rsi_s.iloc[-1])
+            _rsi_prev  = float(_rsi_s.iloc[-2]) if len(_rsi_s) >= 2 else _rsi_now
+            _rsi_max8  = float(_rsi_s.iloc[-8:].max()) if len(_rsi_s) >= 8 else _rsi_now
+            _was_overbought = _rsi_max8 > 70.0
+            _rsi_ok = _was_overbought and _rsi_now < 58.0 and _rsi_now > _rsi_prev
+        if not _rsi_ok:
             continue
 
-        # (4) Price ≥2% above recent low (tech.h24_low)
-        if tech.h24_low > 0 and price < tech.h24_low * 1.02:
-            continue
-
-        # (5) 2-candle wick confirmation (close > EMA20, low near EMA20, vol ok)
-        m5_ema20 = m5.get("ema20", 0.0)
-        if m5_ema20 > 0:
-            # Already checked by _base_5m_gate_ok but verify close above EMA20
-            if not m5.get("price_above_ema20", False):
-                continue
-
-        # (6) Global 4H cooldown not active — already checked above
         _apply_5m_to_tech(tech, m5)
 
         new_leg = leg_number + 1
