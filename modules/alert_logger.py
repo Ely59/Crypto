@@ -266,26 +266,27 @@ _VERDICT_ORDER = ("GOOD", "LATE", "FALSE", "LEG2", "NEUTRAL")
 
 
 def _classify_verdict(
-    pct_1h:  float | None,
-    pct_4h:  float | None,
-    pct_24h: float | None,
-    dip_pct: float,
+    pct_1h:   float | None,
+    pct_4h:   float | None,
+    pct_24h:  float | None,
+    dip_pct:  float,
+    tp1_pct:  float = 5.0,
 ) -> str:
     """
-    Classify a single alert outcome.
-      GOOD    — up >5% within 4H
+    Classify a single alert outcome using pattern-appropriate TP1 threshold.
+      GOOD    — up >= tp1_pct within 4H  (default 5%; GRIND uses 6%)
       FALSE   — down >3% within 4H
       LEG2    — dipped >6% then recovered above entry within 24H
-      LATE    — flat/down at 1H, position already missed or reversed early
+      LATE    — flat/weak at 1H, position already missed or reversed early
       NEUTRAL — everything else
     """
-    if pct_4h is not None and pct_4h >= 5.0:
+    if pct_4h is not None and pct_4h >= tp1_pct:
         return "GOOD"
     if pct_4h is not None and pct_4h <= -3.0:
         return "FALSE"
     if dip_pct >= 6.0 and pct_24h is not None and pct_24h > 0.0:
         return "LEG2"
-    if pct_1h is not None and pct_1h <= 0.5 and pct_4h is not None and pct_4h < 5.0:
+    if pct_1h is not None and pct_1h <= 0.5 and pct_4h is not None and pct_4h < tp1_pct:
         return "LATE"
     return "NEUTRAL"
 
@@ -399,7 +400,9 @@ def run_backtesting(date_str: str) -> dict:
                 min_low  = float(w24["low"].min())
                 dip_pct  = max(0.0, (entry_price - min_low) / entry_price * 100.0)
 
-        verdict = _classify_verdict(pct1, pct4, pct24, dip_pct)
+        # Use pattern-appropriate TP1 as the GOOD threshold
+        tp1_pct = 6.0 if pat_type == "GRIND" else 5.0
+        verdict = _classify_verdict(pct1, pct4, pct24, dip_pct, tp1_pct=tp1_pct)
 
         entries.append({
             "symbol":   symbol,
