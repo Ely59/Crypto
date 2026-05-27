@@ -340,6 +340,33 @@ def run_tier3_scan():
     log.info(f"Tier 3 scan: {len(results)} leg continuation(s) sent.")
 
 
+def run_grind_scanner():
+    """
+    GRIND scanner — every 5 minutes.
+    Independent of the main pipeline; detects slow-grind 5m momentum builds.
+    Stage A: silent tracking (added to _grind_candidates).
+    Stage B: EARLY GRIND alert when 4+ consecutive green candles + quality checks pass.
+    """
+    log.debug("GRIND scan: starting…")
+    try:
+        results = m5.scan_grind()
+    except Exception as exc:
+        log.error(f"GRIND scan FAILED: {exc}")
+        return
+
+    if not results:
+        log.debug("GRIND scan: no new alerts.")
+        return
+
+    mg = _session_margin
+    lv = _session_leverage
+    for grind in results:
+        m4.send_grind_alert(grind, mg, lv)
+        m_log.log_alert(grind, grind.recommendation)
+
+    log.info(f"GRIND scan: {len(results)} alert(s) sent.")
+
+
 def run_radar_signal_scan():
     """
     RADAR / SIGNAL scan — every 5 minutes.
@@ -710,6 +737,9 @@ async def _command_poll_async() -> None:
                 elif text.startswith("/stage0"):
                     _reply(chat_id, m4.build_stage0_message(m5.get_stage0_watchlist()))
                     log.info("/stage0 replied.")
+                elif text.startswith("/grind"):
+                    _reply(chat_id, m4.build_grind_watchlist_message(m5.get_grind_candidates()))
+                    log.info("/grind replied.")
                 elif text.startswith("/backtesting"):
                     parts    = text.split()
                     date_arg = parts[1].strip() if len(parts) > 1 else ""
@@ -872,6 +902,15 @@ def start_scheduler():
         replace_existing = True,
     )
 
+    # ── Job 11: GRIND scanner — every 5 minutes ───────────────────────────────
+    scheduler.add_job(
+        func             = run_grind_scanner,
+        trigger          = CronTrigger(minute="*/5", timezone="UTC"),
+        id               = "grind_scanner_5m",
+        name             = "5M GRIND Scanner",
+        replace_existing = True,
+    )
+
     log.info("Scheduler registered:")
     log.info(f"  • Daily briefing     — 08:00 Stuttgart (Europe/Berlin)")
     log.info(f"  • M5 daily summary   — 08:01 Stuttgart (Europe/Berlin)")
@@ -882,6 +921,7 @@ def start_scheduler():
     log.info(f"  • Tier 2             — every 5M  (active watch rescan)")
     log.info(f"  • Tier 3             — every 3M  (leg continuation)")
     log.info(f"  • RADAR/SIGNAL       — every 5M  (10m cross detection)")
+    log.info(f"  • GRIND Scanner      — every 5M  (slow-grind 5m momentum)")
     log.info(f"  • Weekly Hit-Rate    — every Sunday 09:00 Berlin")
 
     # Start the /status command listener (always — keeps Telegram connection alive)

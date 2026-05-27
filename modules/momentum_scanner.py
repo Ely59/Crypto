@@ -332,6 +332,42 @@ class MomentumResult:
     pattern_bonus: int = 0    # score pts added for detected pattern
 
 
+@dataclass
+class GrindResult:
+    """
+    Result from the GRIND scanner (independent pipeline).
+    Returned by scan_grind(); used by telegram_alerts.build_grind_alert()
+    and alert_logger.log_alert().
+    """
+    symbol:          str
+    name:            str
+    mexc_symbol:     str
+    price:           float
+    entry_price:     float
+    stop_loss:       float
+    tp1:             float
+    tp2:             float
+    sl_pct:          float
+    market_cap:      float
+    volume_24h:      float
+    circ_supply_pct: float
+    ath_dist_pct:    float
+    ath_price:       float
+    vol_mc_pct:      float      # Vol/MC as percentage (e.g. 35.0 = 35%)
+    grind_age_min:   float      # minutes since Stage A entry
+    stage_a_price:   float      # price when first added to candidates
+    rsi_at_stage_a:  float
+    rsi_now:         float
+    consec_candles:  int
+    quality_count:   int        # number of quality checks passed (0-5)
+    quality_flags:   dict       # {"q1": bool, ..., "q5": bool}
+    # log_alert compatibility
+    total_score:     int  = 0
+    recommendation:  str  = "GRIND"
+    pattern_type:    str  = "GRIND"
+    leg_number:      int  = 1
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Cooldown — keyed by symbol, 2-hour window
 # ══════════════════════════════════════════════════════════════════════════════
@@ -513,6 +549,23 @@ def _mark_early_gc_alerted(symbol: str) -> None:
     stale = time.time() - 86_400
     for k in [k for k, ts in _early_gc_alerted.items() if ts < stale]:
         del _early_gc_alerted[k]
+
+
+# ── GRIND scanner state ───────────────────────────────────────────────────────
+# symbol → {mexc_symbol, added_ts, price_at_add, rsi_at_add, name, mcap, vol_24h, fdv_ratio, circ_pct}
+_grind_candidates: dict[str, dict] = {}
+_grind_alerted:    dict[str, float] = {}   # 2H cooldown after alert fires
+
+
+def _on_grind_cooldown(symbol: str) -> bool:
+    return (time.time() - _grind_alerted.get(symbol, 0.0)) < cfg.MOMENTUM_GRIND_COOLDOWN_MIN * 60
+
+
+def _mark_grind_alerted(symbol: str) -> None:
+    _grind_alerted[symbol] = time.time()
+    stale = time.time() - 86_400
+    for k in [k for k, ts in list(_grind_alerted.items()) if ts < stale]:
+        del _grind_alerted[k]
 
 
 # ── Tiered scan state — MASTER PROMPT Part A ─────────────────────────────────
@@ -3633,6 +3686,214 @@ def get_stage0_watchlist() -> list[dict]:
         })
     result.sort(key=lambda x: x["age_min"])
     return result
+
+
+def get_grind_candidates() -> list[dict]:
+    """Return current _grind_candidates snapshot for /grind command."""
+    now = time.time()
+    result = []
+    for symbol, entry in list(_grind_candidates.items()):
+        age_min       = (now - entry["added_ts"]) / 60.0
+        current_price = _cmc_price_cache.get(symbol, entry.get("price_at_add", 0.0))
+        result.append({
+            "symbol":        symbol,
+            "name":          entry.get("name", symbol),
+            "age_min":       round(age_min, 1),
+            "stage_a_price": entry.get("price_at_add", 0.0),
+            "current_price": current_price,
+            "rsi_at_add":    entry.get("rsi_at_add", 0.0),
+            "mcap":          entry.get("mcap", 0.0),
+        })
+    result.sort(key=lambda x: x["age_min"])
+    return result
+
+
+def scan_grind() -> "list[GrindResult]":
+    """
+    GRIND scanner — runs every 5 min, completely independent of the main pipeline.
+
+    Stage A (silent): ≥2 consecutive green 5m candles above EMA20, RSI6 35-78, vol ≥ 0.8×MA10.
+      → Coin added to _grind_candidates with TTL 60 min.
+
+    Stage B (alert): ≥4 candles + Vol/MC > 25% + ≥10% below 90d high + ≥2/5 quality checks.
+      → Returns GrindResult for each coin ready to alert.
+
+    EXPLOSION override: if ≥2 of the grind candles have body > 4%, the coin is deferred
+    to the main scanner (which handles explosive moves) and removed from candidates.
+    """
+    global _grind_candidates, _grind_alerted
+
+    now = time.time()
+    results: list[GrindResult] = []
+
+    if not _cmc_data_cache:
+        log.debug("GRIND: CMC cache empty — skipping")
+        return results
+
+    mexc_syms = get_mexc_futures_symbols()
+
+    # Expire stale Stage A candidates (TTL)
+    ttl_sec = cfg.MOMENTUM_GRIND_TTL_MIN * 60
+    expired = [s for s, c in list(_grind_candidates.items()) if now - c["added_ts"] > ttl_sec]
+    for sym in expired:
+        del _grind_candidates[sym]
+        log.debug(f"GRIND: {sym} expired (TTL {cfg.MOMENTUM_GRIND_TTL_MIN}m)")
+
+    for symbol, cmc_entry in list(_cmc_data_cache.items()):
+        name, matched_tags, mcap, vol_24h, fdv, fdv_ratio, circ_pct = cmc_entry
+        mexc_symbol = f"{symbol}_USDT"
+
+        if mexc_symbol not in mexc_syms:
+            continue
+        if _on_grind_cooldown(symbol):
+            continue
+
+        price = _cmc_price_cache.get(symbol, 0.0)
+        if price <= 0:
+            continue
+
+        # Fetch 5m klines (primary data source for GRIND)
+        df5m = get_mexc_futures_klines(mexc_symbol, "5m", limit=cfg.MOMENTUM_TA_5M_LIMIT)
+        time.sleep(0.1)
+        if df5m is None or len(df5m) < 20:
+            continue
+
+        closes = df5m["close"].astype(float)
+        opens  = df5m["open"].astype(float)
+        vols   = df5m["volume"].astype(float)
+
+        ema20_s   = compute_ema(closes, 20)
+        ema6_s    = compute_ema(closes,  6)
+        rsi_s     = compute_rsi(closes, period=6)
+        _, _, j_s = compute_kdj(df5m)
+
+        m5_ema20 = float(ema20_s.iloc[-1])
+        m5_ema6  = float(ema6_s.iloc[-1])
+        m5_rsi6  = float(rsi_s.iloc[-1])
+        m5_kdj_j = float(j_s.iloc[-1]) if len(j_s) >= 1 else 50.0
+        vol_ma10 = float(vols.rolling(10).mean().iloc[-1])
+        vol_last = float(vols.iloc[-1])
+
+        # Count consecutive green candles above EMA20, detect EXPLOSION candles
+        consec = 0
+        explosion_count = 0
+        for i in range(1, min(20, len(closes))):
+            c   = float(closes.iloc[-i])
+            o   = float(opens.iloc[-i])
+            ema = float(ema20_s.iloc[-i])
+            if c > o and c > ema:
+                consec += 1
+                body_pct = (c - o) / o * 100.0 if o > 0 else 0.0
+                if body_pct > cfg.MOMENTUM_GRIND_EXPLOSION_BODY_PCT:
+                    explosion_count += 1
+            else:
+                break
+
+        # EXPLOSION override: defer to main scanner
+        if consec >= 2 and explosion_count >= 2:
+            _grind_candidates.pop(symbol, None)
+            log.debug(f"GRIND {symbol}: EXPLOSION ({explosion_count} explosive candles) — deferred")
+            continue
+
+        # Stage A gate
+        rsi_ok   = cfg.MOMENTUM_GRIND_RSI_MIN <= m5_rsi6 <= cfg.MOMENTUM_GRIND_RSI_MAX
+        vol_ok_a = vol_ma10 > 0 and vol_last >= cfg.MOMENTUM_GRIND_VOL_MIN_A * vol_ma10
+        if not (consec >= cfg.MOMENTUM_GRIND_MIN_CONSEC_A and rsi_ok and vol_ok_a):
+            _grind_candidates.pop(symbol, None)
+            continue
+
+        # Add to Stage A candidates if new
+        if symbol not in _grind_candidates:
+            _grind_candidates[symbol] = {
+                "mexc_symbol":   mexc_symbol,
+                "added_ts":      now,
+                "price_at_add":  price,
+                "rsi_at_add":    round(m5_rsi6, 1),
+                "name":          name,
+                "mcap":          mcap,
+                "vol_24h":       vol_24h,
+                "fdv_ratio":     fdv_ratio,
+                "circ_pct":      circ_pct,
+            }
+            log.debug(f"GRIND Stage A: {symbol} ({consec} green candles, RSI {m5_rsi6:.1f})")
+
+        # ── Stage B mandatory checks ──────────────────────────────────────────
+        if consec < cfg.MOMENTUM_GRIND_MIN_CONSEC_B:
+            continue
+
+        vol_mc = vol_24h / mcap if mcap > 0 else 0.0
+        if vol_mc < cfg.MOMENTUM_GRIND_VOLMC_MIN:
+            continue
+
+        h90d = _get_90d_high(mexc_symbol)
+        if h90d <= 0 or price <= 0:
+            continue
+        ath_dist = (h90d - price) / h90d * 100.0
+        if ath_dist < cfg.MOMENTUM_GRIND_ATH_DIST_MIN:
+            continue
+
+        # ── Quality checks (≥ 2 of 5 must pass) ─────────────────────────────
+        avg_vol_last4 = float(vols.iloc[-5:-1].mean()) if len(vols) >= 5 else vol_last
+        vol_first2    = (float(vols.iloc[-consec:-consec+2].mean())
+                         if consec >= 4 and len(vols) > consec
+                         else float(vols.iloc[-consec:].mean()))
+        vol_last2     = float(vols.iloc[-2:].mean()) if len(vols) >= 2 else vol_last
+        rsi_4ago      = float(rsi_s.iloc[-5]) if len(rsi_s) >= 5 else (m5_rsi6 - 1.0)
+
+        q1 = m5_ema6 > m5_ema20                               # EMA6 > EMA20
+        q2 = vol_ma10 > 0 and avg_vol_last4 >= vol_ma10       # avg vol last 4 candles ≥ MA10
+        q3 = vol_last > vol_first2 if vol_first2 > 0 else False  # vol building
+        q4 = m5_rsi6 > rsi_4ago                               # RSI rising vs 4 candles ago
+        q5 = m5_kdj_j < 85                                    # KDJ J < 85
+
+        quality_count = sum([q1, q2, q3, q4, q5])
+        if quality_count < cfg.MOMENTUM_GRIND_QUALITY_MIN:
+            continue
+
+        # ── Build GrindResult ─────────────────────────────────────────────────
+        cand          = _grind_candidates[symbol]
+        grind_age_min = (now - cand["added_ts"]) / 60.0
+        entry         = price
+        sl  = round(entry * (1 - cfg.MOMENTUM_GRIND_SL_PCT  / 100.0), 8)
+        tp1 = round(entry * (1 + cfg.MOMENTUM_GRIND_TP1_PCT / 100.0), 8)
+        tp2 = round(entry * (1 + cfg.MOMENTUM_GRIND_TP2_PCT / 100.0), 8)
+
+        result = GrindResult(
+            symbol          = symbol,
+            name            = name,
+            mexc_symbol     = mexc_symbol,
+            price           = price,
+            entry_price     = entry,
+            stop_loss       = sl,
+            tp1             = tp1,
+            tp2             = tp2,
+            sl_pct          = cfg.MOMENTUM_GRIND_SL_PCT,
+            market_cap      = mcap,
+            volume_24h      = vol_24h,
+            circ_supply_pct = circ_pct,
+            ath_dist_pct    = round(ath_dist, 1),
+            ath_price       = round(h90d, 8),
+            vol_mc_pct      = round(vol_mc * 100.0, 1),
+            grind_age_min   = round(grind_age_min, 0),
+            stage_a_price   = cand["price_at_add"],
+            rsi_at_stage_a  = cand["rsi_at_add"],
+            rsi_now         = round(m5_rsi6, 1),
+            consec_candles  = consec,
+            quality_count   = quality_count,
+            quality_flags   = {"q1": q1, "q2": q2, "q3": q3, "q4": q4, "q5": q5},
+        )
+        results.append(result)
+
+        # Mark alerted + remove from Stage A candidates
+        _mark_grind_alerted(symbol)
+        del _grind_candidates[symbol]
+        log.info(
+            f"GRIND Stage B: {symbol} — {consec} candles, RSI {m5_rsi6:.1f}, "
+            f"quality {quality_count}/5, 90d dist {ath_dist:.1f}%, "
+            f"Vol/MC {vol_mc*100:.0f}%"
+        )
+
+    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════

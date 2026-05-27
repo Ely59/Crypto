@@ -429,6 +429,22 @@ MOMENTUM_GLOBAL_SQ_EXCEPTION_PCT   = 10.0   # SQ exception fires if price moved 
 # ─── Alert logging (FIX 6) ───────────────────────────────────────────────────
 ALERT_LOG_CSV = "logs/alert_log.csv"
 
+# ─── GRIND Scanner ────────────────────────────────────────────────────────────
+MOMENTUM_GRIND_MIN_CONSEC_A       = 2      # Stage A: min consecutive green candles
+MOMENTUM_GRIND_MIN_CONSEC_B       = 4      # Stage B: min consecutive green candles
+MOMENTUM_GRIND_RSI_MIN            = 35.0   # RSI6 lower bound
+MOMENTUM_GRIND_RSI_MAX            = 78.0   # RSI6 upper bound
+MOMENTUM_GRIND_VOL_MIN_A          = 0.8    # Stage A: vol ≥ 0.8× MA10
+MOMENTUM_GRIND_VOLMC_MIN          = 0.25   # Stage B: Vol/MC > 25%
+MOMENTUM_GRIND_ATH_DIST_MIN       = 10.0   # Stage B: ≥ 10% below 90d high
+MOMENTUM_GRIND_TTL_MIN            = 60     # Stage A TTL minutes before expiry
+MOMENTUM_GRIND_COOLDOWN_MIN       = 120    # 2H per-coin cooldown after alert
+MOMENTUM_GRIND_SL_PCT             = 4.0    # stop-loss %
+MOMENTUM_GRIND_TP1_PCT            = 6.0    # TP1 % (59% close)
+MOMENTUM_GRIND_TP2_PCT            = 12.0   # TP2 % (runner)
+MOMENTUM_GRIND_EXPLOSION_BODY_PCT = 4.0    # candle body > 4% = EXPLOSION candle
+MOMENTUM_GRIND_QUALITY_MIN        = 2      # Stage B: need ≥ 2 of 5 quality checks
+
 # ─── MEXC Trading API (authenticated) ────────────────────────────────────────
 MEXC_API_KEY    = os.getenv("MEXC_API_KEY", "").strip()
 MEXC_API_SECRET = os.getenv("MEXC_API_SECRET", "").strip()

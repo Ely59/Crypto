@@ -2340,6 +2340,7 @@ def build_help_message() -> str:
         "/explain COIN — What happened to a specific coin (e.g. /explain POLYX)",
         "/recovery — Near-miss Recovery Bounce candidates",
         "/stage0      — Pre-breakout watchlist (Stage 0 consolidating coins)",
+        "/grind       — Current GRIND radar (slow-grind coins being tracked)",
         "/backtesting YYYY-MM-DD — Per-alert outcome report for a past date",
         "/summary  — Today's full stats summary",
         "/passed   — All M1–M7 candidates from last scan with gate status",
@@ -2657,6 +2658,128 @@ def send_signal_alert(info: dict) -> tuple[bool, int | None]:
     text = build_signal_text(info)
     log.info(f"Sending SIGNAL alert for {sym} with buttons (bk={info['bk_price']:.4g})")
     return send_message_with_buttons(text, keyboard)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GRIND Scanner alert builders
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_grind_watchlist_message(candidates: list) -> str:
+    """/grind — Current GRIND radar candidates."""
+    if not candidates:
+        return (
+            "📈 <b>GRIND RADAR</b>\n\n"
+            "No coins in grind tracking.\n\n"
+            "<i>Coins appear here when 2+ consecutive 5m green candles above EMA20 are "
+            "detected with RSI 35–78 and vol ≥ 0.8× MA10.</i>"
+        )
+
+    lines = [
+        "📈 <b>GRIND RADAR</b>",
+        f"  {len(candidates)} coin(s) tracked",
+        "",
+    ]
+    for c in candidates:
+        sym   = c["symbol"]
+        age   = c["age_min"]
+        s_px  = c["stage_a_price"]
+        cur   = c["current_price"]
+        rsi   = c["rsi_at_add"]
+        pct   = (cur - s_px) / s_px * 100.0 if s_px > 0 else 0.0
+        lines += [
+            f"<b>{sym}</b>  —  {age:.0f} min ago  |  RSI {rsi:.0f} at Stage A",
+            f"  Stage A: ${_fmt_price(s_px)} → now ${_fmt_price(cur)}  ({pct:+.1f}%)",
+            "",
+        ]
+    lines.append("<i>4+ candles + quality checks → EARLY GRIND alert fires.</i>")
+    return "\n".join(lines)
+
+
+def build_grind_alert(grind, margin: float = 5.0, leverage: int = 5) -> str:
+    """Build the EARLY GRIND alert message body."""
+    import config as _cfg
+
+    scale = _get_price_scale(grind.mexc_symbol)
+    def fp(p: float) -> str:
+        return f"${p:.{scale}f}"
+
+    pos_size = margin * leverage
+    profit1  = pos_size * (_cfg.MOMENTUM_GRIND_TP1_PCT / 100.0) * 0.59
+    profit2  = pos_size * (_cfg.MOMENTUM_GRIND_TP2_PCT / 100.0) * 0.41
+
+    mcap_str = _vol_human(grind.market_cap) if grind.market_cap > 0 else "N/A"
+
+    levels: list[tuple[float, str]] = [
+        (grind.tp2,        f"── TP2  +{_cfg.MOMENTUM_GRIND_TP2_PCT:.0f}% → +${profit2:.2f} (runner)"),
+        (grind.tp1,        f"── TP1  +{_cfg.MOMENTUM_GRIND_TP1_PCT:.0f}%  → +${profit1:.2f} (59% close)"),
+        (grind.entry_price, "── Entry ← now"),
+        (grind.stop_loss,  f"▁▁ SL  -{grind.sl_pct:.0f}%"),
+    ]
+    levels.sort(key=lambda x: x[0], reverse=True)
+    level_lines = [f"{fp(price)} {label}" for price, label in levels]
+
+    lines = [
+        f"Current price: {fp(grind.price)}",
+        "",
+        f"📈 <b>{grind.symbol}</b> — EARLY GRIND",
+        _SEP,
+        f"Current price: {fp(grind.price)}",
+        f"MCap {mcap_str} | 90d -{grind.ath_dist_pct:.0f}% | Vol/MC {grind.vol_mc_pct:.0f}%",
+        f"Grind running: ~{grind.grind_age_min:.0f} min | Started ~{fp(grind.stage_a_price)}",
+        f"RSI: {grind.rsi_at_stage_a:.0f} → {grind.rsi_now:.0f} ↑",
+        f"5m ✅  15m ⬜  1H ⬜  4H ⬜ (info)",
+        "",
+        "📊 LEVELS",
+    ]
+    lines.extend(level_lines)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_grind_keyboard(grind, margin: float, leverage: int) -> "InlineKeyboardMarkup":
+    """Register a pending GRIND entry order and return the inline keyboard."""
+    entry_id = _short_id()
+    sym      = grind.symbol
+    _pending_signal_orders[entry_id] = {
+        "order_type": "grind_entry",
+        "symbol":     sym,
+        "mexc_symbol": grind.mexc_symbol,
+        "side":       "BUY",
+        "price":      grind.entry_price,
+        "sl":         grind.stop_loss,
+        "tp1":        grind.tp1,
+        "tp2":        grind.tp2,
+        "margin":     margin,
+        "leverage":   leverage,
+        "created_at": time.time(),
+    }
+    # Expire old pending orders (>24H)
+    stale = time.time() - 86_400
+    for k in [k for k, v in list(_pending_signal_orders.items()) if v.get("created_at", 0) < stale]:
+        del _pending_signal_orders[k]
+
+    fd = _fmt_price_dollar
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"✅ ENTRY {fd(grind.entry_price)}",
+                callback_data=json.dumps({"a": "o", "id": entry_id}, separators=(",", ":")),
+            ),
+            InlineKeyboardButton(
+                "❌ Skip",
+                callback_data=json.dumps({"a": "s", "sym": sym}, separators=(",", ":")),
+            ),
+        ],
+    ])
+
+
+def send_grind_alert(grind, margin: float = 5.0, leverage: int = 5) -> bool:
+    """Send an EARLY GRIND alert with Entry/Skip inline keyboard buttons."""
+    text     = build_grind_alert(grind, margin, leverage)
+    keyboard = _build_grind_keyboard(grind, margin, leverage)
+    ok, _    = send_message_with_buttons(text, keyboard)
+    log.info(f"GRIND alert sent for {grind.symbol} @ {grind.entry_price:.6g}")
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════════════════════
