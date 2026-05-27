@@ -2152,7 +2152,7 @@ def build_backtesting_message(result: dict) -> str:
 
     def _fmt_pct(v: float | None) -> str:
         if v is None:
-            return "  N/A  "
+            return "N/A"
         return f"{v:+.1f}%"
 
     def _fmt_price(p: float) -> str:
@@ -2165,30 +2165,38 @@ def build_backtesting_message(result: dict) -> str:
             return f"${p:.4f}"
         return f"${p:.6f}"
 
-    # Build table rows
-    col_w = {"SYM": 7, "TIME": 6, "ENTRY": 9, "PCT": 7}
-    hdr   = (
-        f"{'COIN':<{col_w['SYM']}} {'TIME':<{col_w['TIME']}} "
+    # Build table rows — columns: COIN TIME SC ENTRY 1H 4H 24H VERDICT
+    # SC = score (2-3 chars); abbreviated verdict labels keep mobile lines tight
+    short_labels = {
+        "GOOD": "GOOD", "LATE": "LATE", "FALSE": "FALSE",
+        "LEG2": "LEG2", "NEUTRAL": "NTRL",
+    }
+    col_w = {"SYM": 6, "TIME": 5, "SC": 3, "ENTRY": 8, "PCT": 6}
+    hdr = (
+        f"{'COIN':<{col_w['SYM']}} {'TIME':<{col_w['TIME']}} {'SC':>{col_w['SC']}}  "
         f"{'ENTRY':>{col_w['ENTRY']}} {'1H':>{col_w['PCT']}} "
-        f"{'4H':>{col_w['PCT']}} {'24H':>{col_w['PCT']}} VERDICT"
+        f"{'4H':>{col_w['PCT']}} {'24H':>{col_w['PCT']}} V"
     )
-    rows = [hdr, "─" * (col_w["SYM"] + col_w["TIME"] + col_w["ENTRY"] + col_w["PCT"] * 3 + 12)]
+    sep_len = col_w["SYM"] + col_w["TIME"] + col_w["SC"] + col_w["ENTRY"] + col_w["PCT"] * 3 + 14
+    rows = [hdr, "─" * sep_len]
 
     for e in entries:
         sym     = e["symbol"][:col_w["SYM"]]
         time_s  = e["time_str"]
+        sc_val  = e.get("score", 0)
+        score_s = str(sc_val) if sc_val and sc_val > 0 else "--"
         entry_s = _fmt_price(e["entry"])
         p1h_s   = _fmt_pct(e["pct_1h"])
         p4h_s   = _fmt_pct(e["pct_4h"])
         p24h_s  = _fmt_pct(e["pct_24h"])
         icon    = verdict_icons.get(e["verdict"], "➡️")
-        label   = verdict_labels.get(e["verdict"], e["verdict"])
-        pat     = f" [{e['pat_type']}]" if e.get("pat_type") else ""
+        label   = short_labels.get(e["verdict"], e["verdict"])
+        pat     = f"[{e['pat_type']}]" if e.get("pat_type") else ""
         rows.append(
-            f"{sym:<{col_w['SYM']}} {time_s:<{col_w['TIME']}} "
+            f"{sym:<{col_w['SYM']}} {time_s:<{col_w['TIME']}} {score_s:>{col_w['SC']}}  "
             f"{entry_s:>{col_w['ENTRY']}} {p1h_s:>{col_w['PCT']}} "
             f"{p4h_s:>{col_w['PCT']}} {p24h_s:>{col_w['PCT']}} "
-            f"{icon} {label}{pat}"
+            f"{icon}{label} {pat}".rstrip()
         )
 
     # Score averages
@@ -2217,7 +2225,7 @@ def build_backtesting_message(result: dict) -> str:
 
     lines += [
         "",
-        "<i>GOOD: >5% in 4H  |  FALSE: down >3% in 4H  |  LEG2: dip >6% then recovered</i>",
+        "<i>GOOD: hit TP1 in 4H  |  FALSE: -3%+ in 4H  |  LEG2: dip &gt;6% recovered  |  SC=score</i>",
     ]
     return "\n".join(lines)
 
