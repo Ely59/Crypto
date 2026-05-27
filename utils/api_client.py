@@ -445,16 +445,21 @@ _FUTURES_INTERVAL_MAP: dict[str, str] = {
 
 
 def get_mexc_futures_klines(
-    symbol:   str,
-    interval: str,
-    limit:    int = 100,
+    symbol:     str,
+    interval:   str,
+    limit:      int = 100,
+    start_time: int | None = None,  # Unix seconds; if set, fetches `limit` candles FROM this time
+    min_candles: int = 20,          # minimum acceptable candle count (use 1 for historical fetches)
 ) -> Optional[pd.DataFrame]:
     """
     Fetch OHLCV candles from the MEXC Contract (Futures) kline API.
 
-    symbol   — MEXC futures symbol with underscore, e.g. "AKT_USDT"
-    interval — standard notation ("4h", "15m") or MEXC format ("Hour4", "Min15")
-    limit    — number of candles to return
+    symbol      — MEXC futures symbol with underscore, e.g. "AKT_USDT"
+    interval    — standard notation ("4h", "15m") or MEXC format ("Hour4", "Min15")
+    limit       — number of candles to return
+    start_time  — Unix timestamp in seconds; when set, returns `limit` candles starting
+                  from this time (uses MEXC `from` param). Omit for recent candles.
+    min_candles — minimum acceptable candle count; set to 1 for historical/backtesting fetches
 
     The MEXC contract kline response is column-oriented:
       data.time   — Unix timestamps in SECONDS (not ms, unlike spot API)
@@ -462,11 +467,15 @@ def get_mexc_futures_klines(
 
     Returns a DataFrame indexed by open_time (UTC) with columns:
       open, high, low, close, volume  (all float)
-    Returns None if the request fails or yields too few candles.
+    Returns None if the request fails or yields fewer than min_candles candles.
     """
     mexc_interval = _FUTURES_INTERVAL_MAP.get(interval, interval)
-    url  = f"{MEXC_CONTRACT_BASE_URL}/api/v1/contract/kline/{symbol}"
-    data = _get(url, params={"interval": mexc_interval, "limit": limit})
+    url    = f"{MEXC_CONTRACT_BASE_URL}/api/v1/contract/kline/{symbol}"
+    params: dict = {"interval": mexc_interval, "limit": limit}
+    if start_time is not None:
+        params["from"] = start_time
+
+    data = _get(url, params=params)
 
     if not data:
         log.error(f"MEXC futures klines: empty response for {symbol} {interval}")
@@ -505,7 +514,7 @@ def get_mexc_futures_klines(
             log.warning(f"Skipping malformed futures kline [{symbol} #{i}]: {e}")
             continue
 
-    if len(rows) < 20:
+    if len(rows) < min_candles:
         log.error(f"MEXC futures klines: too few valid candles ({len(rows)}) for {symbol}")
         return None
 

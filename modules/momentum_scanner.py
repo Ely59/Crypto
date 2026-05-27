@@ -866,7 +866,7 @@ def scan_radar_and_signal(
         if price <= 0:
             continue
 
-        _ath_dist, _ath_px, _ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
+        _ath_dist, _ath_px, _ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
 
         if m10_crossed and cond_score >= _cfg.SIGNAL_MIN_CONDITIONS and not on_signal:
             # ── SIGNAL ────────────────────────────────────────────────────────
@@ -1521,6 +1521,31 @@ def _lookup_ath(ath_map: dict, symbol: str, price: float,
     return fallback_dist, 0.0, ""
 
 
+# ── 90-day swing high (FIX 3) ─────────────────────────────────────────────────
+_90d_high_cache: dict[str, tuple[float, float]] = {}  # mexc_sym → (high, fetch_ts)
+
+
+def _get_90d_high(mexc_symbol: str) -> float:
+    """Return 90-day candle high from MEXC daily klines (cached 1h)."""
+    cached = _90d_high_cache.get(mexc_symbol)
+    if cached and time.time() - cached[1] < 3600:
+        return cached[0]
+    df = get_mexc_futures_klines(mexc_symbol, "1d", limit=90)
+    high = float(df["high"].max()) if df is not None and not df.empty else 0.0
+    _90d_high_cache[mexc_symbol] = (high, time.time())
+    return high
+
+
+def _lookup_local_high(mexc_symbol: str, price: float,
+                       fallback_dist: float) -> tuple[float, float, str]:
+    """Return (dist_pct, high_90d, '90d') using MEXC 90-day swing high."""
+    high = _get_90d_high(mexc_symbol)
+    if high > 0 and price > 0:
+        dist = round((high - price) / high * 100.0, 1)
+        return dist, round(high, 8), "90d"
+    return fallback_dist, 0.0, ""
+
+
 def _lookup_atl(ath_map: dict, symbol: str) -> float:
     """Return ATL price from CoinGecko map (0.0 if not available)."""
     info = ath_map.get(symbol, {})
@@ -1758,6 +1783,7 @@ def _check_stage0(mexc_symbol: str, price: float) -> dict | None:
 
     return {
         "consolidation_high": round(window_high, 8),
+        "consolidation_low":  round(window_low,  8),
         "ma10_vol":           round(ma10_vol, 2),
         "range_pct":          round(range_pct, 2),
         "rsi5m":              round(rsi5m, 1),
@@ -1943,6 +1969,7 @@ def scan() -> list[MomentumResult]:
         _stage0_watchlist[symbol] = {
             "mexc_symbol":        mexc_symbol,
             "consolidation_high": s0["consolidation_high"],
+            "consolidation_low":  s0["consolidation_low"],
             "ma10_vol":           s0["ma10_vol"],
             "added_ts":           _now_ts,
             "name":               name,
@@ -2053,8 +2080,7 @@ def scan() -> list[MomentumResult]:
             sq_1h_ok  = cfg.MOMENTUM_SQ_1H_MIN <= change_1h <= cfg.MOMENTUM_SQ_1H_MAX
             if sq_rsi_ok and sq_1h_ok:
                 has_inf_now  = _inf_supply_map.get(symbol, False)
-                _sq_ath_dist, _sq_ath_price, _sq_ath_date = _lookup_ath(
-                    _ath_map, symbol, price, tech.ath_dist_pct)
+                _sq_ath_dist, _sq_ath_price, _sq_ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
                 sq_score = (_score_squeeze(tech, mcap, circ_pct, has_inf_now)
                             + _ath_score(_sq_ath_dist))
                 if sq_score >= cfg.MOMENTUM_SQ_MIN_SCORE:
@@ -2110,17 +2136,16 @@ def scan() -> list[MomentumResult]:
         # Fundamental bonus
         fund = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
 
-        # ATH distance — real ATH from CoinGecko (fallback to 16D candle peak)
-        real_ath_dist, real_ath_price, real_ath_date = _lookup_ath(
-            _ath_map, symbol, price, tech.ath_dist_pct)
+        # ATH distance — 90-day swing high from MEXC daily klines (replaces all-time ATH)
+        real_ath_dist, real_ath_price, real_ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
 
-        # Hard block: coin within 10% of ATH — risk/reward too poor
+        # Hard block: coin within 10% of 90d high — risk/reward too poor (near recent resistance)
         if real_ath_dist < cfg.MOMENTUM_ATH_DIST_HARD_BLOCK:
-            log.info(f"  ATH BLOCK  {symbol}: only {real_ath_dist:.1f}% below ATH")
+            log.info(f"  90d BLOCK  {symbol}: only {real_ath_dist:.1f}% below 90d high")
             _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "ATH_BLOCK",
-                f"Only {real_ath_dist:.1f}% below ATH — hard block", tech.vol_pct, tech.h4_kdj_j))
+                f"Only {real_ath_dist:.1f}% below 90d high — hard block", tech.vol_pct, tech.h4_kdj_j))
             _pi.update({"ath_dist_pct": real_ath_dist, "rec": "ATH_BLOCK",
-                        "detail": f"Only {real_ath_dist:.1f}% below ATH — hard block"})
+                        "detail": f"Only {real_ath_dist:.1f}% below 90d high — hard block"})
             continue
 
         _pi["ath_dist_pct"] = real_ath_dist
@@ -2334,18 +2359,28 @@ def scan() -> list[MomentumResult]:
             if not (cfg.MOMENTUM_5M_RSI_LOW <= tech.m5_rsi6 <= cfg.MOMENTUM_5M_RSI_HOT):
                 gc_5m_warn.append("5m RSI out of range — wait for entry zone or reduce position size")
 
+        # Score gate: GC must reach WATCH threshold (≥65) using same formula as main pipeline
+        _gc_ath_dist, _gc_ath_price, _gc_ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
+        if _gc_ath_dist < cfg.MOMENTUM_ATH_DIST_HARD_BLOCK:
+            log.debug(f"  GC skip {symbol}: {_gc_ath_dist:.1f}% below 90d high — hard block")
+            continue
+        _gc_fund  = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
+        _gc_total = tech.score + _gc_fund.total + _ath_score(_gc_ath_dist) + tech.h4_score + tech.h1_score
+        if _gc_total < cfg.MOMENTUM_TOTAL_WATCH:
+            log.debug(f"  GC skip {symbol}: score {_gc_total} < {cfg.MOMENTUM_TOTAL_WATCH}")
+            continue
+
         log.info(
             f"  ⚡ GOLDEN CROSS  {symbol}  1h {change_1h:+.2f}%  "
-            f"RSI {tech.m15_rsi6:.1f}  Vol {tech.vol_pct:.0f}%"
+            f"RSI {tech.m15_rsi6:.1f}  Vol {tech.vol_pct:.0f}%  score {_gc_total}"
         )
         _mark_gc_alerted(symbol)
         _mark_global_alerted(symbol, "GOLDEN CROSS", price)
-        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "GC", "GOLDEN CROSS", tech.vol_pct, tech.h4_kdj_j))
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, _gc_total, "GC", "GOLDEN CROSS", tech.vol_pct, tech.h4_kdj_j))
 
         gc_sl_factor = 1.0 - cfg.MOMENTUM_GC_SL_PCT / 100.0
         gc_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_GC_SL_PCT / 100.0, 2)
         gc_rr_str    = f"1:{_rwd_tp1 / gc_risk_usd:.2f}"
-        _gc_ath_dist, _gc_ath_price, _gc_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
         gc_alerts.append(MomentumResult(
             symbol          = symbol,
@@ -2361,6 +2396,7 @@ def scan() -> list[MomentumResult]:
             matched_tags    = matched_tags,
             mexc_symbol     = mexc_symbol,
             tech            = tech,
+            total_score     = _gc_total,
             recommendation  = "GOLDEN CROSS",
             rec_emoji       = "⚡",
             warnings        = gc_5m_warn,
@@ -2427,17 +2463,27 @@ def scan() -> list[MomentumResult]:
         if _vs_near_atl:
             vs_5m_warn.append("Near ATL in downtrend — pump-and-dump risk. Use 30% of normal margin only.")
 
+        # Score gate: VS must reach WATCH threshold (≥65)
+        _vs_ath_dist, _vs_ath_price, _vs_ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
+        if _vs_ath_dist < cfg.MOMENTUM_ATH_DIST_HARD_BLOCK:
+            log.debug(f"  VS skip {symbol}: {_vs_ath_dist:.1f}% below 90d high — hard block")
+            continue
+        _vs_fund  = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
+        _vs_total = tech.score + _vs_fund.total + _ath_score(_vs_ath_dist) + tech.h4_score + tech.h1_score
+        if _vs_total < cfg.MOMENTUM_TOTAL_WATCH:
+            log.debug(f"  VS skip {symbol}: score {_vs_total} < {cfg.MOMENTUM_TOTAL_WATCH}")
+            continue
+
         log.info(
             f"  ⚡ VOL SPIKE  {symbol}  1h {change_1h:+.2f}%  "
-            f"vol {tech.m15_vol_spike_ratio:.1f}×  RSI {tech.m15_rsi6:.1f}"
+            f"vol {tech.m15_vol_spike_ratio:.1f}×  RSI {tech.m15_rsi6:.1f}  score {_vs_total}"
         )
         _mark_vs_alerted(symbol)
         _mark_global_alerted(symbol, "VOLUME SPIKE", price)
-        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "VS", "VOLUME SPIKE", tech.vol_pct, tech.h4_kdj_j))
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, _vs_total, "VS", "VOLUME SPIKE", tech.vol_pct, tech.h4_kdj_j))
 
         vs_sl_factor = 1.0 - cfg.MOMENTUM_VS_SL_PCT / 100.0
         vs_risk_usd  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_VS_SL_PCT / 100.0, 2)
-        _vs_ath_dist, _vs_ath_price, _vs_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
         vs_alerts.append(MomentumResult(
             symbol          = symbol,
@@ -2453,6 +2499,7 @@ def scan() -> list[MomentumResult]:
             matched_tags    = matched_tags,
             mexc_symbol     = mexc_symbol,
             tech            = tech,
+            total_score     = _vs_total,
             recommendation  = "VOLUME SPIKE",
             rec_emoji       = "⚡",
             warnings        = vs_5m_warn,
@@ -2541,14 +2588,25 @@ def scan() -> list[MomentumResult]:
         if tech.m5_rsi6 > 0 and not tech.m5_first_green:
             rb_5m_warn.append("5m first green candle not confirmed — wait for entry zone")
 
+        # Score gate: RB must reach WATCH threshold (≥65)
+        _rb_ath_dist, _rb_ath_price, _rb_ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
+        if _rb_ath_dist < cfg.MOMENTUM_ATH_DIST_HARD_BLOCK:
+            log.debug(f"  RB skip {symbol}: {_rb_ath_dist:.1f}% below 90d high — hard block")
+            continue
+        _rb_fund  = _score_fundamentals(change_1h, mcap, circ_pct, fdv_ratio)
+        _rb_total = tech.score + _rb_fund.total + _ath_score(_rb_ath_dist) + tech.h4_score + tech.h1_score
+        if _rb_total < cfg.MOMENTUM_TOTAL_WATCH:
+            log.debug(f"  RB skip {symbol}: score {_rb_total} < {cfg.MOMENTUM_TOTAL_WATCH}")
+            continue
+
         pullback_shown = (h24_high - current) / h24_high * 100
         log.info(
             f"  ♻️ RECOVERY  {symbol}  1h {change_1h:+.2f}%  "
-            f"peak {h24_high:.4g}  pullback {pullback_shown:.1f}%  KDJ {tech.h4_kdj_j:.1f}"
+            f"peak {h24_high:.4g}  pullback {pullback_shown:.1f}%  KDJ {tech.h4_kdj_j:.1f}  score {_rb_total}"
         )
         _mark_rb_alerted(symbol)
         _mark_global_alerted(symbol, "RECOVERY", price)
-        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, 0, "RB", "RECOVERY", tech.vol_pct, tech.h4_kdj_j))
+        _last_scan_outcomes.append(CandidateOutcome(symbol, change_1h, _rb_total, "RB", "RECOVERY", tech.vol_pct, tech.h4_kdj_j))
 
         rb_sl_factor  = 1.0 - cfg.MOMENTUM_RB_SL_PCT / 100.0
         rb_tp1_factor = 1.0 + cfg.MOMENTUM_RB_TP1_PCT / 100.0
@@ -2556,7 +2614,6 @@ def scan() -> list[MomentumResult]:
         rb_risk_usd   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_SL_PCT / 100.0, 2)
         rb_rwd_tp1    = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_TP1_PCT / 100.0, 2)
         rb_rwd_tp2    = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_RB_TP2_PCT / 100.0, 2)
-        _rb_ath_dist, _rb_ath_price, _rb_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
 
         rb_alerts.append(MomentumResult(
             symbol          = symbol,
@@ -2572,6 +2629,7 @@ def scan() -> list[MomentumResult]:
             matched_tags    = matched_tags,
             mexc_symbol     = mexc_symbol,
             tech            = tech,
+            total_score     = _rb_total,
             recommendation  = "RECOVERY",
             rec_emoji       = "♻️",
             warnings        = rb_5m_warn,
@@ -2621,7 +2679,7 @@ def scan() -> list[MomentumResult]:
         # ATH distance — real ATH from CoinGecko, fallback to 16D candle high
         h16d_high        = float(df_4h["high"].max())
         _h16d_dist       = (h16d_high - price) / h16d_high * 100 if h16d_high > 0 else 0.0
-        ath_dist_pct, _pbw_ath_price, _pbw_ath_date = _lookup_ath(_ath_map, symbol, price, _h16d_dist)
+        ath_dist_pct, _pbw_ath_price, _pbw_ath_date = _lookup_local_high(mexc_symbol, price, _h16d_dist)
 
         pbw = _check_5m_pbw(mexc_symbol, fear_mode=_fear_mode)
         if pbw is None:
@@ -2821,7 +2879,7 @@ def scan() -> list[MomentumResult]:
         risk   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_SL_PCT  / 100.0, 2)
         rwd1   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_TP1_PCT / 100.0, 2)
         rwd2   = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SC_TP2_PCT / 100.0, 2)
-        _sc_ath_dist, _sc_ath_price, _sc_ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
+        _sc_ath_dist, _sc_ath_price, _sc_ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
 
         sc_alerts.append(MomentumResult(
             symbol=symbol, name=name, price=round(price, 8),
@@ -2975,7 +3033,7 @@ def scan() -> list[MomentumResult]:
         sp_rwd1  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SPEED_TP1_PCT / 100, 2)
         sp_rwd2  = round(cfg.MOMENTUM_POSITION_USD * cfg.MOMENTUM_SPEED_TP2_PCT / 100, 2)
 
-        _sp_ath_dist, _sp_ath_price, _sp_ath_date = _lookup_ath(_ath_map, sym, price, 0.0)
+        _sp_ath_dist, _sp_ath_price, _sp_ath_date = _lookup_local_high(mexc_sym, price, 0.0)
 
         speed_alerts.append(MomentumResult(
             symbol=sym, name=name, price=round(price, 8),
@@ -3042,8 +3100,7 @@ def scan() -> list[MomentumResult]:
         if h4_transition_ok and not egc_tech.h4_ema_ok:
             egc_tech.h4_transitioning = True
 
-        _egc_ath_dist, _egc_ath_price, _egc_ath_date = _lookup_ath(
-            _ath_map, symbol, price, egc_tech.ath_dist_pct)
+        _egc_ath_dist, _egc_ath_price, _egc_ath_date = _lookup_local_high(mexc_symbol, price, egc_tech.ath_dist_pct)
         egc_score = _score_early_gc(egc_tech, m5gc, _egc_ath_dist)
 
         if egc_score < cfg.MOMENTUM_EARLY_GC_MIN_SCORE:
@@ -3176,18 +3233,25 @@ def scan() -> list[MomentumResult]:
 def scan_tier2() -> list:
     """
     Tier 2 scan — every 5 minutes.
-    Re-scans coins in _active_watch (those showing 5m EMA cross / spike in last Tier 1).
-    Skips full Stage 1 CMC fetch. Applies Stage 2 momentum checks only.
-    Returns new alerts (same MomentumResult type as scan()).
+
+    Part A: Re-scans coins in _active_watch with the full Tier 1 scoring formula
+            (4H is a score factor, not a gate; includes h1_score, S0 bonus, pattern).
+    Part B: Scans all _stage0_watchlist entries for breakouts above consolidation_high,
+            giving Stage 0 breakout alerts 5-min resolution instead of 15-min.
+
+    Skips full Stage 1 CMC fetch. Returns MomentumResult objects.
     """
     global _tier2_last_run
     _tier2_last_run = time.time()
 
-    if not _active_watch:
-        log.debug("Tier 2: active_watch empty — skipping.")
+    if not _active_watch and not _stage0_watchlist:
+        log.debug("Tier 2: active_watch and stage0_watchlist both empty — skipping.")
         return []
 
-    log.info(f"Tier 2 scan: {len(_active_watch)} coins in active_watch.")
+    log.info(
+        f"Tier 2 scan: {len(_active_watch)} in active_watch, "
+        f"{len(_stage0_watchlist)} in stage0_watchlist."
+    )
     _refresh_market_context()
     _ath_map    = get_coingecko_ath_map(limit=500)
     futures_set = get_mexc_futures_symbols()
@@ -3195,9 +3259,11 @@ def scan_tier2() -> list:
         log.error("Tier 2 aborted — MEXC futures list unavailable.")
         return []
 
-    results: list = []
-    alerted_syms  = set(_global_alerted.keys())
+    _t2_now             = time.time()
+    results: list       = []
+    alerted_this_t2: set[str] = set()
 
+    # ── Part A: _active_watch — full Tier 1 scoring, 4H as score factor ──────
     for mexc_symbol in list(_active_watch):
         symbol = mexc_symbol.replace("_USDT", "")
         if _on_global_cooldown(symbol, "TIER2", 0.0):
@@ -3219,21 +3285,7 @@ def scan_tier2() -> list:
 
         _apply_5m_to_tech(tech, m5)
 
-        # 4H gate: Method A, B, or C
-        h4_trans_ok = tech.h4_ema6 > tech.h4_ema12 and tech.h4_ema6 > tech.h4_ema20
-        if not (tech.h4_ema_ok or tech.h4_method_b or h4_trans_ok):
-            continue
-
-        # Simple scoring for Tier 2 (fundamental data pulled from CMC cache)
-        tier2_score = tech.score + (5 if tech.h4_ema_ok else 0) + (3 if tech.h4_method_b else 0)
-
-        if tier2_score < 55:
-            continue
-
-        decimals = _price_decimals(price)
-        _ath_dist, _ath_px, _ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
-
-        # Pull real CMC data from cache so name/mcap/circ show correctly in alert
+        # Pull CMC data from cache (needed for fundamental scoring)
         cached = _cmc_data_cache.get(symbol)
         if cached:
             t2_name, t2_tags, t2_mcap, t2_vol, t2_fdv, t2_fdr, t2_circ = cached
@@ -3242,10 +3294,44 @@ def scan_tier2() -> list:
                 symbol, [], 0.0, 0.0, 0.0, 0.0, 0.0
             )
 
-        log.info(f"  Tier2 ✓  {symbol}  score {tier2_score}  → WATCH  MCap ${t2_mcap/1e6:.0f}M")
+        # Full Tier 1 scoring formula
+        # change_1h not cached in Tier 2 — gain_pts component is 0
+        fund    = _score_fundamentals(0.0, t2_mcap, t2_circ, t2_fdr)
+        _ath_dist, _ath_px, _ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
+        ath_pts = _ath_score(_ath_dist)
+
+        _s0_entry = _stage0_watchlist.get(symbol)
+        s0_bonus  = 0
+        if _s0_entry and price > _s0_entry["consolidation_high"]:
+            _age_min = (_t2_now - _s0_entry["added_ts"]) / 60.0
+            if _age_min <= cfg.MOMENTUM_S0_BREAKOUT_WINDOW:
+                s0_bonus = cfg.MOMENTUM_S0_BREAKOUT_BONUS
+                log.info(f"  Tier2 S0 break  {symbol}: +{s0_bonus}pts (above ${_s0_entry['consolidation_high']:.6g})")
+
+        _pat_type, _pat_bonus = _detect_pattern(mexc_symbol, s0_bonus > 0)
+
+        # 4H: +20 fully bullish / +8 partial / -10 bearish / 0 neutral (no hard gate)
+        tier2_score = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score + s0_bonus + _pat_bonus
+        tier2_score = max(0, min(100, tier2_score))
+
+        if tier2_score < cfg.MOMENTUM_TOTAL_WATCH:
+            log.debug(f"  Tier2 skip {symbol}: score {tier2_score} < {cfg.MOMENTUM_TOTAL_WATCH}  4H {tech.h4_status}")
+            continue
+
+        decimals = _price_decimals(price)
+        if tier2_score >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:
+            t2_rec, t2_emoji = "STRONG ENTRY", "🟢"
+        else:
+            t2_rec, t2_emoji = "WATCH", "🟡"
+
+        log.info(
+            f"  Tier2 ✓  {symbol}  score {tier2_score}  → {t2_rec}  "
+            f"MCap ${t2_mcap/1e6:.0f}M  4H {tech.h4_status}"
+        )
         _mark_alerted(symbol)
-        _mark_global_alerted(symbol, "WATCH", price)
-        _add_to_watchlist(symbol, price, "WATCH")
+        _mark_global_alerted(symbol, t2_rec, price)
+        _add_to_watchlist(symbol, price, t2_rec)
+        alerted_this_t2.add(symbol)
 
         results.append(MomentumResult(
             symbol=symbol, name=t2_name, price=round(price, 8),
@@ -3254,15 +3340,107 @@ def scan_tier2() -> list:
             fdv_mcap_ratio=round(t2_fdr, 2), circ_supply_pct=round(t2_circ, 1),
             matched_tags=t2_tags,
             mexc_symbol=mexc_symbol,
-            tech=tech, total_score=tier2_score,
-            recommendation="WATCH", rec_emoji="🟡",
+            tech=tech, fund=fund, total_score=tier2_score,
+            recommendation=t2_rec, rec_emoji=t2_emoji,
             warnings=["Tier 2 rescan — verify chart before entry"],
+            ath_pts=ath_pts,
             entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), decimals),
             stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SL_PCT / 100), decimals),
             tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), decimals),
             tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), decimals),
             sl_pct=cfg.MOMENTUM_SL_PCT,
             ath_dist_pct=_ath_dist, ath_price=_ath_px, ath_date=_ath_date,
+            stage0_breakout=(s0_bonus > 0),
+            pattern_type=_pat_type,
+            pattern_bonus=_pat_bonus,
+        ))
+
+    # ── Part B: Stage 0 breakout scan — runs every 5 min instead of 15 ───────
+    for symbol, s0_entry in list(_stage0_watchlist.items()):
+        if symbol in alerted_this_t2:
+            continue
+        if _on_global_cooldown(symbol, "TIER2", 0.0):
+            continue
+
+        mexc_symbol = s0_entry["mexc_symbol"]
+        if mexc_symbol not in futures_set:
+            continue
+
+        age_min = (_t2_now - s0_entry["added_ts"]) / 60.0
+        if age_min > cfg.MOMENTUM_S0_BREAKOUT_WINDOW:
+            continue
+
+        m5 = _check_5m(mexc_symbol)
+        if not _base_5m_gate_ok(m5):
+            continue
+
+        tech = _check_technicals(mexc_symbol)
+        if tech is None:
+            continue
+
+        price = tech.m15_price
+        if price <= 0 or price <= s0_entry["consolidation_high"]:
+            continue
+
+        _apply_5m_to_tech(tech, m5)
+
+        cached = _cmc_data_cache.get(symbol)
+        if cached:
+            t2_name, t2_tags, t2_mcap, t2_vol, t2_fdv, t2_fdr, t2_circ = cached
+        else:
+            t2_name  = s0_entry.get("name", symbol)
+            t2_mcap  = s0_entry.get("mcap", 0.0)
+            t2_tags, t2_vol, t2_fdv, t2_fdr, t2_circ = [], 0.0, 0.0, 0.0, 0.0
+
+        fund    = _score_fundamentals(0.0, t2_mcap, t2_circ, t2_fdr)
+        _ath_dist, _ath_px, _ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
+        ath_pts = _ath_score(_ath_dist)
+
+        s0_bonus           = cfg.MOMENTUM_S0_BREAKOUT_BONUS
+        _pat_type, _pat_bonus = _detect_pattern(mexc_symbol, True)
+
+        s0_score = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score + s0_bonus + _pat_bonus
+        s0_score = max(0, min(100, s0_score))
+
+        if s0_score < cfg.MOMENTUM_TOTAL_WATCH:
+            log.debug(f"  Tier2 S0 {symbol}: score {s0_score} < {cfg.MOMENTUM_TOTAL_WATCH} — below threshold")
+            continue
+
+        decimals = _price_decimals(price)
+        if s0_score >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:
+            s0_rec, s0_emoji = "STRONG ENTRY", "🟢"
+        else:
+            s0_rec, s0_emoji = "WATCH", "🟡"
+
+        log.info(
+            f"  Tier2 S0 BREAK  {symbol}  score {s0_score}  → {s0_rec}  "
+            f"above ${s0_entry['consolidation_high']:.6g}  added {age_min:.0f}m ago"
+        )
+        _mark_alerted(symbol)
+        _mark_global_alerted(symbol, s0_rec, price)
+        _add_to_watchlist(symbol, price, s0_rec)
+        alerted_this_t2.add(symbol)
+
+        results.append(MomentumResult(
+            symbol=symbol, name=t2_name, price=round(price, 8),
+            change_1h=0.0, change_24h=0.0,
+            market_cap=t2_mcap, volume_24h=t2_vol, fdv=t2_fdv,
+            fdv_mcap_ratio=round(t2_fdr, 2), circ_supply_pct=round(t2_circ, 1),
+            matched_tags=t2_tags,
+            mexc_symbol=mexc_symbol,
+            tech=tech, fund=fund, total_score=s0_score,
+            recommendation=s0_rec, rec_emoji=s0_emoji,
+            warnings=["Stage 0 breakout — broke above consolidation high"],
+            ath_pts=ath_pts,
+            entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), decimals),
+            stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SL_PCT / 100), decimals),
+            tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), decimals),
+            tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), decimals),
+            sl_pct=cfg.MOMENTUM_SL_PCT,
+            ath_dist_pct=_ath_dist, ath_price=_ath_px, ath_date=_ath_date,
+            stage0_breakout=True,
+            pattern_type=_pat_type,
+            pattern_bonus=_pat_bonus,
         ))
 
     log.info(f"Tier 2 done — {len(results)} alert(s).")
@@ -3383,7 +3561,7 @@ def scan_tier3() -> list[MomentumResult]:
         )
 
         decimals = _price_decimals(price)
-        _ath_dist, _ath_px, _ath_date = _lookup_ath(_ath_map, symbol, price, tech.ath_dist_pct)
+        _ath_dist, _ath_px, _ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
 
         _mark_alerted(symbol)
         _mark_global_alerted(symbol, "LEG_CONTINUATION", price)
@@ -3429,6 +3607,32 @@ def get_tier_status() -> dict:
         "tier3_coins": len(_alert_watchlist),
         "tier3_ago":   int(now - _tier3_last_run)   if _tier3_last_run > 0 else -1,
     }
+
+
+def get_stage0_watchlist() -> list[dict]:
+    """
+    Return a snapshot of the current Stage 0 pre-breakout watchlist for /stage0.
+    Each entry dict has: symbol, consolidation_high, consolidation_low, range_pct,
+    rsi5m, added_ts, age_min, expires_in_min, price_at_add, name.
+    """
+    now = time.time()
+    result = []
+    for symbol, entry in _stage0_watchlist.items():
+        age_min        = (now - entry["added_ts"]) / 60.0
+        expires_in_min = cfg.MOMENTUM_S0_BREAKOUT_WINDOW - age_min
+        result.append({
+            "symbol":           symbol,
+            "name":             entry.get("name", symbol),
+            "consolidation_high": entry["consolidation_high"],
+            "consolidation_low":  entry.get("consolidation_low", 0.0),
+            "range_pct":        entry.get("range_pct", 0.0),
+            "rsi5m":            entry.get("rsi5m", 0.0),
+            "price_at_add":     entry.get("price_at_add", 0.0),
+            "age_min":          round(age_min, 1),
+            "expires_in_min":   round(max(0.0, expires_in_min), 1),
+        })
+    result.sort(key=lambda x: x["age_min"])
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════

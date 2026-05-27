@@ -220,9 +220,9 @@ MOMENTUM_TA_VOL_RATIO_MIN = 1.20   # current 4H candle vol must exceed 120% of M
 # Technical maximum: 60 pts  (50 pts from 15m + 10 pts from volume)
 #
 # ─── Fundamental bonus scoring (0-40 pts) ────────────────────────────────────
-MOMENTUM_FUND_MCAP_L1_MIN_USD  = 50_000_000      # $50M — lower bound for MCap bonus
+MOMENTUM_FUND_MCAP_L1_MIN_USD  = 25_000_000      # $25M — lower bound for MCap bonus (was $50M)
 MOMENTUM_FUND_MCAP_L1_MAX_USD  = 2_000_000_000   # $2B  — upper bound for MCap bonus
-MOMENTUM_FUND_MCAP_PTS         = 15              # +15 pts if MCap in [$50M, $2B]
+MOMENTUM_FUND_MCAP_PTS         = 15              # +15 pts if MCap in [$25M, $2B]
 MOMENTUM_FUND_CIRC_MIN_PCT     = 60.0            # circ supply above 60 % → +10 pts
 MOMENTUM_FUND_CIRC_PTS         = 10
 MOMENTUM_FUND_FDV_RATIO_MAX    = 2.0             # FDV/MCap below 2× → +10 pts
@@ -282,8 +282,8 @@ MOMENTUM_PBW_COOLDOWN_MIN     = 60     # Pre-Breakout Watch: 1h (was 2h — accu
 MOMENTUM_SC_COOLDOWN_MIN      = 60     # Staircase: 1h (was 2h — leg pauses are short)
 
 # ─── New-signal min scores (CHANGE D) ─────────────────────────────────────────
-MOMENTUM_PBW_MIN_SCORE        = 60     # PBW fires if fund quality ≥ this
-MOMENTUM_SC_MIN_SCORE         = 60     # SC fires if fund quality ≥ this
+MOMENTUM_PBW_MIN_SCORE        = 65     # PBW fires if fund quality ≥ this (was 60)
+MOMENTUM_SC_MIN_SCORE         = 65     # SC fires if fund quality ≥ this (was 60)
 
 # ─── Entry precision (ADDITION 2) ──────────────────────────────────────────────
 MOMENTUM_ENTRY_LIMIT_OFFSET   = 0.001  # entry = last_price × (1 + 0.1%) — direct MEXC limit
@@ -392,7 +392,7 @@ MOMENTUM_EARLY_GC_MCAP_MIN   = 10_000_000  # $10M minimum MCap
 MOMENTUM_EARLY_GC_RSI_MIN    = 30.0   # 5m RSI lower bound (not oversold)
 MOMENTUM_EARLY_GC_RSI_MAX    = 72.0   # 5m RSI upper bound (not overbought)
 MOMENTUM_EARLY_GC_VOL_MIN    = 1.5    # 5m vol ≥ 1.5× MA10 required
-MOMENTUM_EARLY_GC_MIN_SCORE  = 60     # minimum score to fire alert
+MOMENTUM_EARLY_GC_MIN_SCORE  = 65     # minimum score to fire alert (was 60)
 MOMENTUM_EARLY_GC_SL_PCT     = 5.0    # SL% for Early GC (tighter than main)
 MOMENTUM_EARLY_GC_COOLDOWN_H = 4.0    # hours between Early GC alerts per coin
 

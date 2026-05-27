@@ -707,6 +707,19 @@ async def _command_poll_async() -> None:
                 elif text.startswith("/recovery"):
                     _reply(chat_id, m4.build_recovery_message(m5._last_rb_watchlist))
                     log.info("/recovery replied.")
+                elif text.startswith("/stage0"):
+                    _reply(chat_id, m4.build_stage0_message(m5.get_stage0_watchlist()))
+                    log.info("/stage0 replied.")
+                elif text.startswith("/backtesting"):
+                    parts    = text.split()
+                    date_arg = parts[1].strip() if len(parts) > 1 else ""
+                    if not date_arg:
+                        _reply(chat_id, "Usage: /backtesting YYYY-MM-DD\nExample: /backtesting 2026-05-26")
+                    else:
+                        _reply(chat_id, "⏳ Fetching klines… this takes ~10–30s.")
+                        bt_result = m_log.run_backtesting(date_arg)
+                        _reply(chat_id, m4.build_backtesting_message(bt_result))
+                    log.info(f"/backtesting {date_arg} replied.")
                 elif text.startswith("/summary"):
                     stats = tracker.get_daily_summary()
                     _reply(chat_id, m4.build_summary_message(stats))

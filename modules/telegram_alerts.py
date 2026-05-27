@@ -256,22 +256,12 @@ def _fmt_price(price: float) -> str:
 
 
 def _fmt_ath_line(coin) -> str:
-    """Return '📅 ATH: $X (Mon YYYY — N days ago)' or '' if data unavailable."""
+    """Return '📅 90d High: $X' or '' if data unavailable."""
     ath_price = getattr(coin, "ath_price", 0.0)
-    ath_date  = getattr(coin, "ath_date",  "")
     if not ath_price or ath_price <= 0:
         return ""
     price_str = _fmt_price(ath_price)
-    if ath_date:
-        try:
-            from datetime import datetime, timezone
-            dt       = datetime.fromisoformat(ath_date.replace("Z", "+00:00"))
-            month_str = dt.strftime("%b %Y")
-            days_ago  = (datetime.now(tz=timezone.utc) - dt).days
-            return f"📅 ATH: ${price_str} ({month_str} — {days_ago:,} days ago)"
-        except Exception:
-            pass
-    return f"📅 ATH: ${price_str}"
+    return f"📅 90d High: ${price_str}"
 
 
 def _signal_chain_lines(coin) -> list[str]:
@@ -472,7 +462,7 @@ def _auto_sentence(coin, sector: str) -> str:
         tf_str = "multiple timeframes"
 
     circ_part = f", {circ_pct:.0f}% supply in circulation" if circ_pct > 0 else ""
-    ath_part  = f"{ath_dist:.0f}% below ATH" if ath_dist > 0 else "near ATH"
+    ath_part  = f"{ath_dist:.0f}% below 90d high" if ath_dist > 0 else "near 90d high"
 
     if rec == "SPEED ALERT":
         return f"{sector} coin, {ath_part}. 5m explosive move detected — act fast."
@@ -519,8 +509,7 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
     _lv = leverage if leverage is not None else _cfg.DEFAULT_LEVERAGE
 
     # ── Line 1: Header ────────────────────────────────────────────────────────
-    _NO_SCORE_RECS = {"COOLING_DOWN", "GOLDEN CROSS", "VOLUME SPIKE",
-                      "RECOVERY", "SPEED ALERT", "EARLY GC"}
+    _NO_SCORE_RECS = {"COOLING_DOWN", "SPEED ALERT"}
     has_score = rec not in _NO_SCORE_RECS and coin.total_score > 0
     if has_score:
         s_em  = _score_emoji(coin.total_score)
@@ -533,7 +522,7 @@ def build_unified_alert(coin, margin: float | None = None, leverage: int | None 
     circ_pct = getattr(coin, 'circ_supply_pct', 0.0)
     mcap_str = _vol_human(coin.market_cap) if coin.market_cap > 0 else "N/A"
     circ_str = f"{circ_pct:.0f}%" if circ_pct > 0 else "N/A"
-    meta_line = f"MCap {mcap_str} | ATH -{ath_dist:.0f}% | Circ {circ_str}"
+    meta_line = f"MCap {mcap_str} | 90d -{ath_dist:.0f}% | Circ {circ_str}"
 
     # ── Line 4: TF status row ─────────────────────────────────────────────────
     def ck(ok: bool) -> str:
@@ -2072,6 +2061,167 @@ def build_recovery_message(rb_watchlist: list) -> str:
     return "\n".join(lines)
 
 
+def build_stage0_message(watchlist: list) -> str:
+    """/stage0 — Current Stage 0 pre-breakout watchlist."""
+    if not watchlist:
+        return (
+            "🔍 <b>STAGE 0 — PRE-BREAKOUT WATCH</b>\n\n"
+            "No coins on pre-breakout watch.\n\n"
+            "Coins appear here when they are consolidating (45m range ≤3%,\n"
+            "RSI 42–68, volume building) with −0.5% ≤ 1H &lt; 0.3%.\n"
+            "A +10 bonus fires when they break above consolidation high within 90 min."
+        )
+
+    lines = [
+        "🔍 <b>STAGE 0 — PRE-BREAKOUT WATCH</b>",
+        f"  {len(watchlist)} coin(s) on watchlist",
+        "",
+    ]
+    for entry in watchlist:
+        sym      = entry["symbol"]
+        hi       = entry["consolidation_high"]
+        lo       = entry["consolidation_low"]
+        rng      = entry["range_pct"]
+        rsi      = entry["rsi5m"]
+        age      = entry["age_min"]
+        exp      = entry["expires_in_min"]
+        add_px   = entry["price_at_add"]
+
+        exp_str  = f"{exp:.0f}m" if exp > 0 else "expired"
+        age_str  = f"{age:.0f}m ago"
+
+        lines += [
+            f"<b>{sym}</b>  —  added {age_str}  |  expires in {exp_str}",
+            f"  Range:  <b>${_fmt_price(lo)}</b> – <b>${_fmt_price(hi)}</b>  "
+            f"({rng:.1f}%)  ← break above <b>${_fmt_price(hi)}</b>",
+            f"  RSI5m:  <b>{rsi:.0f}</b>  |  Price at add: ${_fmt_price(add_px)}",
+            "",
+        ]
+
+    lines.append("<i>Coins get +10 bonus when they break above consolidation high within 90 min.</i>")
+    return "\n".join(lines)
+
+
+def build_backtesting_message(result: dict) -> str:
+    """/backtesting YYYY-MM-DD — per-alert outcome report for a given date."""
+    date_str = result.get("date", "?")
+    error    = result.get("error")
+    has_data = result.get("has_data", False)
+    entries  = result.get("entries", [])
+
+    # Friendly display date
+    try:
+        from datetime import datetime as _dt
+        display_date = _dt.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        display_date = date_str
+
+    header = f"📊 <b>BACKTESTING — {display_date}</b>\n"
+
+    if error:
+        return header + f"\n❌ Error: {error}"
+
+    if not has_data:
+        return (
+            header
+            + "\nNo alerts logged for this date.\n\n"
+            + "<i>If you just deployed the bot, alert logging is now active and "
+            "results will appear for future dates.</i>\n\n"
+            + "<i>Tip: /backtesting YYYY-MM-DD — use today's or yesterday's date.</i>"
+        )
+
+    # Count verdicts
+    counts: dict[str, int] = {"GOOD": 0, "LATE": 0, "FALSE": 0, "LEG2": 0, "NEUTRAL": 0}
+    for e in entries:
+        counts[e["verdict"]] = counts.get(e["verdict"], 0) + 1
+
+    verdict_icons = {
+        "GOOD": "✅", "LATE": "⚠️", "FALSE": "❌", "LEG2": "🔄", "NEUTRAL": "➡️",
+    }
+    verdict_labels = {
+        "GOOD": "GOOD TIMING", "LATE": "TOO LATE",
+        "FALSE": "FALSE SIGNAL", "LEG2": "LEG 2 SETUP", "NEUTRAL": "NEUTRAL",
+    }
+
+    total = len(entries)
+    summary_parts = [f"Total: {total}"]
+    for v in ("GOOD", "LATE", "FALSE", "LEG2"):
+        if counts[v]:
+            summary_parts.append(f"{verdict_icons[v]} {counts[v]}")
+    summary_line = "  |  ".join(summary_parts)
+
+    def _fmt_pct(v: float | None) -> str:
+        if v is None:
+            return "  N/A  "
+        return f"{v:+.1f}%"
+
+    def _fmt_price(p: float) -> str:
+        """Format entry price with appropriate decimal places."""
+        if p >= 100:
+            return f"${p:.2f}"
+        if p >= 1:
+            return f"${p:.3f}"
+        if p >= 0.01:
+            return f"${p:.4f}"
+        return f"${p:.6f}"
+
+    # Build table rows
+    col_w = {"SYM": 7, "TIME": 6, "ENTRY": 9, "PCT": 7}
+    hdr   = (
+        f"{'COIN':<{col_w['SYM']}} {'TIME':<{col_w['TIME']}} "
+        f"{'ENTRY':>{col_w['ENTRY']}} {'1H':>{col_w['PCT']}} "
+        f"{'4H':>{col_w['PCT']}} {'24H':>{col_w['PCT']}} VERDICT"
+    )
+    rows = [hdr, "─" * (col_w["SYM"] + col_w["TIME"] + col_w["ENTRY"] + col_w["PCT"] * 3 + 12)]
+
+    for e in entries:
+        sym     = e["symbol"][:col_w["SYM"]]
+        time_s  = e["time_str"]
+        entry_s = _fmt_price(e["entry"])
+        p1h_s   = _fmt_pct(e["pct_1h"])
+        p4h_s   = _fmt_pct(e["pct_4h"])
+        p24h_s  = _fmt_pct(e["pct_24h"])
+        icon    = verdict_icons.get(e["verdict"], "➡️")
+        label   = verdict_labels.get(e["verdict"], e["verdict"])
+        pat     = f" [{e['pat_type']}]" if e.get("pat_type") else ""
+        rows.append(
+            f"{sym:<{col_w['SYM']}} {time_s:<{col_w['TIME']}} "
+            f"{entry_s:>{col_w['ENTRY']}} {p1h_s:>{col_w['PCT']}} "
+            f"{p4h_s:>{col_w['PCT']}} {p24h_s:>{col_w['PCT']}} "
+            f"{icon} {label}{pat}"
+        )
+
+    # Score averages
+    good_scores  = [e["score"] for e in entries if e["verdict"] == "GOOD"  and e["score"] > 0]
+    false_scores = [e["score"] for e in entries if e["verdict"] == "FALSE" and e["score"] > 0]
+    avg_good  = sum(good_scores)  / len(good_scores)  if good_scores  else None
+    avg_false = sum(false_scores) / len(false_scores) if false_scores else None
+
+    # Most common false-signal pattern
+    false_pats = [e["pat_type"] for e in entries if e["verdict"] == "FALSE" and e["pat_type"]]
+    top_false_pat = max(set(false_pats), key=false_pats.count) if false_pats else None
+
+    lines: list[str] = [
+        header,
+        summary_line,
+        "",
+        f"<code>{chr(10).join(rows)}</code>",
+        "",
+    ]
+    if avg_good is not None:
+        lines.append(f"Ø Score good signals:  <b>{avg_good:.0f}</b>")
+    if avg_false is not None:
+        lines.append(f"Ø Score false signals: <b>{avg_false:.0f}</b>")
+    if top_false_pat:
+        lines.append(f"Most common false pattern: <b>{top_false_pat}</b>")
+
+    lines += [
+        "",
+        "<i>GOOD: >5% in 4H  |  FALSE: down >3% in 4H  |  LEG2: dip >6% then recovered</i>",
+    ]
+    return "\n".join(lines)
+
+
 def build_summary_message(stats) -> str:
     """/summary — Today's full stats (same as 08:01 daily summary)."""
     return build_m5_daily_summary(stats)
@@ -2102,7 +2252,7 @@ def build_passed_message(passed_candidates: list, last_scan_ts: str) -> str:
         detail    = p.get("detail", "")
 
         mcap_str  = f"${mcap/1e6:.0f}M" if mcap >= 1e6 else f"${mcap:.0f}"
-        ath_str   = f"ATH -{ath_dist:.0f}%" if ath_dist > 0 else "ATH N/A"
+        ath_str   = f"90d -{ath_dist:.0f}%" if ath_dist > 0 else "90d N/A"
         score_str = f"Score {score}" if score > 0 else rec
 
         tf_str = f"5m {_ck(m5_ok)} 15m {_ck(m15_ok)} 4H {_ck(h4_ok)}"
@@ -2189,6 +2339,8 @@ def build_help_message() -> str:
         "/filters  — All active filter thresholds",
         "/explain COIN — What happened to a specific coin (e.g. /explain POLYX)",
         "/recovery — Near-miss Recovery Bounce candidates",
+        "/stage0      — Pre-breakout watchlist (Stage 0 consolidating coins)",
+        "/backtesting YYYY-MM-DD — Per-alert outcome report for a past date",
         "/summary  — Today's full stats summary",
         "/passed   — All M1–M7 candidates from last scan with gate status",
         "/tier2    — Active Tier 2 watch coins (5m momentum)",
@@ -2348,11 +2500,25 @@ def _build_coin_keyboard(coin, margin: float, leverage: int) -> "InlineKeyboardM
 
 def send_alert_with_buttons(coin, margin: float = 5.0, leverage: int = 5) -> bool:
     """Send any MomentumResult as a unified alert WITH inline keyboard buttons.
-    Suppresses buttons if entry_valid=False — sends text only."""
+
+    entry_valid=False behaviour:
+      - LEG_CONTINUATION, RECOVERY: exempt — sends text without buttons (leg 2+ may arrive late)
+      - all other types: suppressed entirely — logged internally, never sent to Telegram
+    """
+    _rec   = getattr(coin, "recommendation", "")
+    _valid = getattr(coin, "entry_valid", True)
+    _exempt = _rec in ("LEG_CONTINUATION", "RECOVERY")
+
+    if not _valid and not _exempt:
+        log.info(
+            f"Alert suppressed — entry expired: {getattr(coin, 'symbol', '?')} [{_rec}]"
+        )
+        return False
+
     text = build_unified_alert(coin, margin, leverage)
-    if not getattr(coin, "entry_valid", True):
-        ok = send_message(text)
-        return ok
+    if not _valid:
+        # Exempt types (LEG_CONTINUATION / RECOVERY) — send text without order buttons
+        return send_message(text)
     keyboard = _build_coin_keyboard(coin, margin, leverage)
     ok, _    = send_message_with_buttons(text, keyboard)
     return ok
@@ -2379,8 +2545,8 @@ def build_signal_text(info: dict) -> str:
     s_em    = _score_emoji(min(score * 20, 100))
     line1   = f"🟢 <b>{sym}</b> — SIGNAL [{score}/5{s_em}]"
 
-    # Meta line — MCap/Circ not available in SIGNAL dict, show ATH only
-    meta_line = f"MCap N/A | ATH -{ath_dist:.0f}% | Circ N/A"
+    # Meta line — MCap/Circ not available in SIGNAL dict, show 90d high only
+    meta_line = f"MCap N/A | 90d -{ath_dist:.0f}% | Circ N/A"
 
     # TF status row
     tf_row = f"3m {ck('3m')}  5m {ck('5m')}  10m ✅  15m {ck('15m')}  4H {ck('4H')}"
