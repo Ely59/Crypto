@@ -1,13 +1,14 @@
 """
 modules/alert_logger.py
-Log every alert to CSV and compute weekly hit-rate statistics.
+Log every alert and compute weekly hit-rate statistics.
 
-CSV columns (v2 schema):
+Storage backend:
+  - PostgreSQL when DATABASE_URL env var is set (Railway)
+  - CSV fallback (logs/alert_log.csv) otherwise
+
+Schema columns:
   timestamp | coin | signal_type | price_at_alert | score |
   pattern_type | leg_number | 4h_max_price | hit | roi_percent
-
-hit = True if price rises ≥5% within 4h after alert.
-Hit checking uses MEXC 1h klines fetched at weekly report time.
 """
 
 from __future__ import annotations
@@ -30,8 +31,58 @@ _CSV_HEADERS = [
     "4h_max_price", "hit", "roi_percent",
 ]
 
-# Set to True once the CSV is confirmed ready (headers migrated) — avoids per-call overhead.
-_csv_ready = False
+# SELECT clause listing columns in _CSV_HEADERS order (used in all DB queries)
+_SELECT_COLS = (
+    'timestamp, coin, signal_type, price_at_alert, score, '
+    'pattern_type, leg_number, "4h_max_price", hit, roi_percent'
+)
+
+_DATABASE_URL: str = (
+    os.getenv("DATABASE_URL", "").strip().replace("postgres://", "postgresql://", 1)
+)
+_csv_ready: bool = False
+_db_ready:  bool = False
+
+
+# ── Storage helpers ───────────────────────────────────────────────────────────
+
+def _use_db() -> bool:
+    return bool(_DATABASE_URL)
+
+
+def _get_conn():
+    import psycopg2
+    return psycopg2.connect(_DATABASE_URL)
+
+
+def _ensure_db() -> None:
+    global _db_ready
+    if _db_ready:
+        return
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id             SERIAL PRIMARY KEY,
+                    timestamp      TEXT NOT NULL,
+                    coin           TEXT,
+                    signal_type    TEXT,
+                    price_at_alert TEXT,
+                    score          TEXT,
+                    pattern_type   TEXT,
+                    leg_number     TEXT,
+                    "4h_max_price" TEXT,
+                    hit            TEXT,
+                    roi_percent    TEXT
+                )
+            """)
+        conn.commit()
+        conn.close()
+        _db_ready = True
+        log.info("alert_logger: PostgreSQL alerts table ready")
+    except Exception as e:
+        log.error(f"alert_logger: DB setup failed: {e}")
 
 
 def _ensure_csv() -> None:
@@ -48,7 +99,6 @@ def _ensure_csv() -> None:
         _csv_ready = True
         return
 
-    # Check whether existing file already has all new columns
     try:
         with open(cfg.ALERT_LOG_CSV, newline="") as f:
             reader = csv.DictReader(f)
@@ -59,7 +109,6 @@ def _ensure_csv() -> None:
                 return
             rows = list(reader)
 
-        # Rewrite with full header; old rows get empty strings for missing columns
         with open(cfg.ALERT_LOG_CSV, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=_CSV_HEADERS, restval="", extrasaction="ignore")
             w.writeheader()
@@ -71,26 +120,66 @@ def _ensure_csv() -> None:
     _csv_ready = True
 
 
+def _init_storage() -> None:
+    if _use_db():
+        _ensure_db()
+    else:
+        _ensure_csv()
+
+
+def _rows_to_dicts(rows: list) -> list[dict]:
+    """Convert raw psycopg2 rows (fetched in _SELECT_COLS order) to CSV-compatible dicts."""
+    return [{k: ("" if v is None else str(v)) for k, v in zip(_CSV_HEADERS, row)} for row in rows]
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
 def log_alert(coin, signal_type: str) -> None:
-    """Write one alert row to the CSV log. Non-blocking — errors are logged, not raised."""
-    _ensure_csv()
-    row = {
-        "timestamp":      datetime.now(tz=_BERLIN).strftime("%Y-%m-%d %H:%M"),
-        "coin":           coin.symbol,
-        "signal_type":    signal_type,
-        "price_at_alert": coin.entry_price,
-        "score":          coin.total_score,
-        "pattern_type":   getattr(coin, "pattern_type",  ""),
-        "leg_number":     getattr(coin, "leg_number",    1),
-        "4h_max_price":   "",
-        "hit":            "",
-        "roi_percent":    "",
-    }
-    try:
-        with open(cfg.ALERT_LOG_CSV, "a", newline="") as f:
-            csv.DictWriter(f, fieldnames=_CSV_HEADERS, extrasaction="ignore").writerow(row)
-    except Exception as e:
-        log.error(f"alert_logger: write failed: {e}")
+    """Write one alert row. Uses PostgreSQL when DATABASE_URL is set, CSV otherwise."""
+    _init_storage()
+    ts = datetime.now(tz=_BERLIN).strftime("%Y-%m-%d %H:%M")
+    if _use_db():
+        try:
+            conn = _get_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO alerts
+                       (timestamp, coin, signal_type, price_at_alert, score,
+                        pattern_type, leg_number, "4h_max_price", hit, roi_percent)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        ts,
+                        coin.symbol,
+                        signal_type,
+                        str(coin.entry_price),
+                        str(coin.total_score),
+                        str(getattr(coin, "pattern_type", "")),
+                        str(getattr(coin, "leg_number", 1)),
+                        "", "", "",
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.error(f"alert_logger: DB write failed: {e}")
+    else:
+        row = {
+            "timestamp":      ts,
+            "coin":           coin.symbol,
+            "signal_type":    signal_type,
+            "price_at_alert": coin.entry_price,
+            "score":          coin.total_score,
+            "pattern_type":   getattr(coin, "pattern_type",  ""),
+            "leg_number":     getattr(coin, "leg_number",    1),
+            "4h_max_price":   "",
+            "hit":            "",
+            "roi_percent":    "",
+        }
+        try:
+            with open(cfg.ALERT_LOG_CSV, "a", newline="") as f:
+                csv.DictWriter(f, fieldnames=_CSV_HEADERS, extrasaction="ignore").writerow(row)
+        except Exception as e:
+            log.error(f"alert_logger: write failed: {e}")
 
 
 def compute_hits_for_pending() -> None:
@@ -101,7 +190,62 @@ def compute_hits_for_pending() -> None:
     import pandas as pd
     from utils.api_client import get_mexc_futures_klines
 
-    _ensure_csv()
+    _init_storage()
+    now = datetime.now(tz=_BERLIN)
+
+    if _use_db():
+        try:
+            conn = _get_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, timestamp, coin, price_at_alert FROM alerts "
+                    "WHERE hit IS NULL OR hit = ''"
+                )
+                pending = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.error(f"alert_logger: DB read failed: {e}")
+            return
+
+        for row_id, ts_str, coin_sym, price_str in pending:
+            try:
+                alert_time = datetime.strptime(ts_str, "%Y-%m-%d %H:%M").replace(tzinfo=_BERLIN)
+            except ValueError:
+                continue
+            elapsed_h = (now - alert_time).total_seconds() / 3600
+            if elapsed_h < 4.0 or elapsed_h > 8 * 24:
+                continue
+            entry_price = float(price_str or 0)
+            if entry_price <= 0:
+                continue
+
+            df = get_mexc_futures_klines(coin_sym + "_USDT", "1h", limit=200)
+            if df is None:
+                continue
+
+            alert_ts = pd.Timestamp(alert_time)
+            window   = df[(df.index >= alert_ts) & (df.index <= alert_ts + pd.Timedelta(hours=4))]
+            if window.empty:
+                continue
+
+            max_price = float(window["high"].max())
+            roi       = (max_price - entry_price) / entry_price * 100
+            hit       = "1" if roi >= 5.0 else "0"
+            log.info(f"  Hit check {coin_sym}: ROI {roi:.1f}% → {'HIT ✅' if roi >= 5.0 else 'MISS ❌'}")
+            try:
+                conn = _get_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        'UPDATE alerts SET "4h_max_price"=%s, hit=%s, roi_percent=%s WHERE id=%s',
+                        (f"{max_price:.8f}", hit, f"{roi:.2f}", row_id),
+                    )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                log.error(f"alert_logger: DB update failed: {e}")
+        return
+
+    # CSV path
     try:
         with open(cfg.ALERT_LOG_CSV, newline="") as f:
             rows = list(csv.DictReader(f))
@@ -109,9 +253,7 @@ def compute_hits_for_pending() -> None:
         log.error(f"alert_logger: read failed: {e}")
         return
 
-    now     = datetime.now(tz=_BERLIN)
     updated = False
-
     for row in rows:
         if row.get("hit"):
             continue
@@ -119,11 +261,9 @@ def compute_hits_for_pending() -> None:
             alert_time = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M").replace(tzinfo=_BERLIN)
         except ValueError:
             continue
-
         elapsed_h = (now - alert_time).total_seconds() / 3600
         if elapsed_h < 4.0 or elapsed_h > 8 * 24:
             continue
-
         symbol      = row["coin"] + "_USDT"
         entry_price = float(row.get("price_at_alert") or 0)
         if entry_price <= 0:
@@ -134,8 +274,7 @@ def compute_hits_for_pending() -> None:
             continue
 
         alert_ts = pd.Timestamp(alert_time)
-        end_ts   = alert_ts + pd.Timedelta(hours=4)
-        window   = df[(df.index >= alert_ts) & (df.index <= end_ts)]
+        window   = df[(df.index >= alert_ts) & (df.index <= alert_ts + pd.Timedelta(hours=4))]
         if window.empty:
             continue
 
@@ -162,26 +301,33 @@ def get_recent_alerts(hours: int = 24) -> list:
     Return the best alert per coin from the last `hours` hours, sorted by score desc.
     Used by the daily briefing to show yesterday's top signals.
     """
-    _ensure_csv()
-    try:
-        with open(cfg.ALERT_LOG_CSV, newline="") as f:
-            rows = list(csv.DictReader(f))
-    except Exception:
-        return []
+    _init_storage()
+    cutoff     = datetime.now(tz=_BERLIN) - timedelta(hours=hours)
+    cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M")
 
-    cutoff = datetime.now(tz=_BERLIN) - timedelta(hours=hours)
-    recent = []
-    for row in rows:
+    if _use_db():
         try:
-            ts = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M").replace(tzinfo=_BERLIN)
-        except ValueError:
-            continue
-        if ts >= cutoff:
-            recent.append(row)
+            conn = _get_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_SELECT_COLS} FROM alerts WHERE timestamp >= %s ORDER BY timestamp",
+                    (cutoff_str,),
+                )
+                rows = _rows_to_dicts(cur.fetchall())
+            conn.close()
+        except Exception as e:
+            log.error(f"alert_logger: DB read failed: {e}")
+            return []
+    else:
+        try:
+            with open(cfg.ALERT_LOG_CSV, newline="") as f:
+                all_rows = list(csv.DictReader(f))
+        except Exception:
+            return []
+        rows = [r for r in all_rows if r.get("timestamp", "") >= cutoff_str]
 
-    # Deduplicate: keep best-score entry per coin
     seen: dict[str, dict] = {}
-    for row in recent:
+    for row in rows:
         coin = row.get("coin", "")
         if not coin:
             continue
@@ -193,48 +339,79 @@ def get_recent_alerts(hours: int = 24) -> list:
 
 def get_alerts_for_date(date_str: str) -> list[dict]:
     """
-    Return all CSV rows whose timestamp date (Berlin local) matches date_str (YYYY-MM-DD).
+    Return all rows whose timestamp date (Berlin local) matches date_str (YYYY-MM-DD).
     Rows are returned in chronological order.
     """
-    _ensure_csv()
+    _init_storage()
+    if _use_db():
+        try:
+            conn = _get_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_SELECT_COLS} FROM alerts WHERE timestamp LIKE %s ORDER BY timestamp",
+                    (date_str + "%",),
+                )
+                rows = _rows_to_dicts(cur.fetchall())
+            conn.close()
+            return rows
+        except Exception as e:
+            log.error(f"alert_logger: DB read failed: {e}")
+            return []
+
     try:
         with open(cfg.ALERT_LOG_CSV, newline="") as f:
             rows = list(csv.DictReader(f))
     except Exception:
         return []
-
-    result = []
-    for row in rows:
-        ts_str = row.get("timestamp", "")
-        if ts_str[:10] == date_str:   # fast prefix match on YYYY-MM-DD
-            result.append(row)
-    return result
+    return [r for r in rows if r.get("timestamp", "")[:10] == date_str]
 
 
 def get_weekly_stats(days: int = 7) -> dict:
-    """Aggregate hit-rate stats from the CSV for the past `days` days."""
-    _ensure_csv()
-    try:
-        with open(cfg.ALERT_LOG_CSV, newline="") as f:
-            rows = list(csv.DictReader(f))
-    except Exception:
-        return {}
+    """Aggregate hit-rate stats from the past `days` days."""
+    _init_storage()
+    now        = datetime.now(tz=_BERLIN)
+    cutoff_str = (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
 
-    now    = datetime.now(tz=_BERLIN)
+    if _use_db():
+        try:
+            conn = _get_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT timestamp, coin, signal_type, hit, roi_percent "
+                    "FROM alerts WHERE (hit='0' OR hit='1') AND timestamp >= %s",
+                    (cutoff_str,),
+                )
+                rows = [
+                    {"timestamp": r[0], "coin": r[1], "signal_type": r[2],
+                     "hit": r[3], "roi_percent": r[4]}
+                    for r in cur.fetchall()
+                ]
+            conn.close()
+        except Exception as e:
+            log.error(f"alert_logger: DB read failed: {e}")
+            return {}
+    else:
+        try:
+            with open(cfg.ALERT_LOG_CSV, newline="") as f:
+                all_rows = list(csv.DictReader(f))
+        except Exception:
+            return {}
+        rows = []
+        for row in all_rows:
+            if not row.get("hit"):
+                continue
+            try:
+                alert_time = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M").replace(tzinfo=_BERLIN)
+            except ValueError:
+                continue
+            if (now - alert_time).days <= days:
+                rows.append(row)
+
     by_sig: dict[str, dict] = {}
     best   = {"coin": "", "roi": -999.0, "sig": ""}
     worst  = {"coin": "", "roi":  999.0, "sig": ""}
 
     for row in rows:
-        if not row.get("hit"):
-            continue
-        try:
-            alert_time = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M").replace(tzinfo=_BERLIN)
-        except ValueError:
-            continue
-        if (now - alert_time).days > days:
-            continue
-
         sig  = row["signal_type"]
         hit  = row["hit"] == "1"
         roi  = float(row.get("roi_percent") or 0)
@@ -311,7 +488,6 @@ def run_backtesting(date_str: str) -> dict:
     import pandas as pd
     from utils.api_client import get_mexc_futures_klines
 
-    # Validate date format
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -358,19 +534,17 @@ def run_backtesting(date_str: str) -> dict:
         start_unix = int(alert_utc.timestamp())
         mexc_sym   = f"{symbol}_USDT"
 
-        # Fetch 30 × 1H candles starting from alert time (covers +1H … +29H)
         df = get_mexc_futures_klines(
             mexc_sym, "1h", limit=30,
             start_time=start_unix,
             min_candles=1,
         )
-        _time.sleep(0.25)   # light rate-limit courtesy
+        _time.sleep(0.25)
 
         def _price_at(offset_h: int) -> float | None:
-            """Close price of 1H candle at alert_utc + offset_h hours."""
             target_utc = alert_utc + timedelta(hours=offset_h)
             if now_utc < target_utc:
-                return None     # not enough time has passed yet
+                return None
             if df is None or df.empty:
                 return None
             target_pd = pd.Timestamp(target_utc)
@@ -390,17 +564,15 @@ def run_backtesting(date_str: str) -> dict:
         pct4  = _pct(p4h)
         pct24 = _pct(p24h)
 
-        # Max drawdown from entry within 24H window (for LEG2 detection)
         dip_pct = 0.0
         if df is not None and not df.empty:
             alert_pd = pd.Timestamp(alert_utc)
             end_pd   = pd.Timestamp(alert_utc + timedelta(hours=24))
             w24 = df[(df.index >= alert_pd) & (df.index <= end_pd)]
             if not w24.empty:
-                min_low  = float(w24["low"].min())
-                dip_pct  = max(0.0, (entry_price - min_low) / entry_price * 100.0)
+                min_low = float(w24["low"].min())
+                dip_pct = max(0.0, (entry_price - min_low) / entry_price * 100.0)
 
-        # Use pattern-appropriate TP1 as the GOOD threshold
         tp1_pct = 6.0 if pat_type == "GRIND" else 5.0
         verdict = _classify_verdict(pct1, pct4, pct24, dip_pct, tp1_pct=tp1_pct)
 

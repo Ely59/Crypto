@@ -21,3 +21,6 @@ colorlog==6.8.2           # Colorized console logs for easier debugging
 
 # ─── Timezone ────────────────────────────────────────────────────────────────
 tzdata==2024.1            # Required on Railway (Linux) — zoneinfo needs the tz database
+
+# ─── Database ────────────────────────────────────────────────────────────────
+psycopg2-binary==2.9.9    # PostgreSQL driver (binary wheel — no libpq build dependency)
