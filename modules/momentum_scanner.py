@@ -3818,6 +3818,12 @@ def scan_grind() -> "list[GrindResult]":
             log.debug(f"GRIND Stage A: {symbol} ({consec} green candles, RSI {m5_rsi6:.1f})")
 
         # ── Stage B mandatory checks ──────────────────────────────────────────
+        # Enforce minimum observation period before Stage B can fire
+        _cand_age_min = (now - _grind_candidates[symbol]["added_ts"]) / 60.0
+        if _cand_age_min < cfg.MOMENTUM_GRIND_MIN_STAGE_A_MINUTES:
+            log.debug(f"GRIND {symbol}: age {_cand_age_min:.0f}m < {cfg.MOMENTUM_GRIND_MIN_STAGE_A_MINUTES}m minimum — waiting")
+            continue
+
         if consec < cfg.MOMENTUM_GRIND_MIN_CONSEC_B:
             continue
 

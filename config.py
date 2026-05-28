@@ -444,6 +444,7 @@ MOMENTUM_GRIND_TP1_PCT            = 6.0    # TP1 % (59% close)
 MOMENTUM_GRIND_TP2_PCT            = 12.0   # TP2 % (runner)
 MOMENTUM_GRIND_EXPLOSION_BODY_PCT = 4.0    # candle body > 4% = EXPLOSION candle
 MOMENTUM_GRIND_QUALITY_MIN        = 2      # Stage B: need ≥ 2 of 5 quality checks
+MOMENTUM_GRIND_MIN_STAGE_A_MINUTES = 15   # Stage B: coin must be in Stage A for ≥ 15 min
 
 # ─── MEXC Trading API (authenticated) ────────────────────────────────────────
 MEXC_API_KEY    = os.getenv("MEXC_API_KEY", "").strip()
