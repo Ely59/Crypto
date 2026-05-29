@@ -2162,7 +2162,7 @@ def build_backtesting_message(result: dict) -> str:
     except ValueError:
         display_date = date_str
 
-    header = f"📊 <b>BACKTESTING — {display_date}</b>\n"
+    header = f"📊 BACKTESTING — {display_date}\n"
 
     if error:
         return header + f"\n❌ Error: {error}"
@@ -2171,9 +2171,9 @@ def build_backtesting_message(result: dict) -> str:
         return (
             header
             + "\nNo alerts logged for this date.\n\n"
-            + "<i>If you just deployed the bot, alert logging is now active and "
-            "results will appear for future dates.</i>\n\n"
-            + "<i>Tip: /backtesting YYYY-MM-DD — use today's or yesterday's date.</i>"
+            + "If you just deployed the bot, alert logging is now active and "
+            "results will appear for future dates.\n\n"
+            + "Tip: /backtesting YYYY-MM-DD — use today's or yesterday's date."
         )
 
     # Count verdicts
@@ -2259,19 +2259,19 @@ def build_backtesting_message(result: dict) -> str:
         header,
         summary_line,
         "",
-        f"<code>{chr(10).join(rows)}</code>",
+        "\n".join(rows),
         "",
     ]
     if avg_good is not None:
-        lines.append(f"Ø Score good signals:  <b>{avg_good:.0f}</b>")
+        lines.append(f"Ø Score good signals:  {avg_good:.0f}")
     if avg_false is not None:
-        lines.append(f"Ø Score false signals: <b>{avg_false:.0f}</b>")
+        lines.append(f"Ø Score false signals: {avg_false:.0f}")
     if top_false_pat:
-        lines.append(f"Most common false pattern: <b>{top_false_pat}</b>")
+        lines.append(f"Most common false pattern: {top_false_pat}")
 
     lines += [
         "",
-        "<i>GOOD: hit TP1 in 4H  |  FALSE: -3%+ in 4H  |  LEG2: dip &gt;6% recovered  |  SC=score</i>",
+        "GOOD: hit TP1 in 4H  |  FALSE: -3%+ in 4H  |  LEG2: dip >6% recovered  |  SC=score",
     ]
     return "\n".join(lines)
 
