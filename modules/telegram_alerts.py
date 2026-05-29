@@ -2026,9 +2026,9 @@ def build_filters_message() -> str:
         f"  SL {cfg.MOMENTUM_EARLY_GC_SL_PCT:.0f}%  TP1 {cfg.MOMENTUM_TP1_PCT:.0f}%  TP2 {cfg.MOMENTUM_TP2_PCT:.0f}%",
         "",
         "<b>GRIND 🔄</b>",
-        f"  Stage A: ≥{cfg.MOMENTUM_GRIND_MIN_CONSEC_A} consec green 5m above EMA20  |  RSI {cfg.MOMENTUM_GRIND_RSI_MIN:.0f}–{cfg.MOMENTUM_GRIND_RSI_MAX:.0f}  |  vol ≥{cfg.MOMENTUM_GRIND_VOL_MIN_A:.1f}× MA10",
-        f"  Stage B: ≥{cfg.MOMENTUM_GRIND_MIN_CONSEC_B} candles  |  EMA6 &gt; EMA20  |  avg vol ≥ MA10  |  ≥{cfg.MOMENTUM_GRIND_ATH_DIST_MIN:.0f}% below 90d high",
-        f"  Quality: 1/3 (vol building, RSI rising, KDJ &lt;{cfg.MOMENTUM_GRIND_KDJ_MAX:.0f})  |  min age: {cfg.MOMENTUM_GRIND_MIN_STAGE_A_MINUTES}m  |  CD: {cfg.MOMENTUM_GRIND_COOLDOWN_MIN // 60}H",
+        f"  ≥{cfg.MOMENTUM_GRIND_MIN_CONSEC} consec green 5m above EMA20  |  EMA6 &gt; EMA20  |  RSI &lt;{cfg.MOMENTUM_GRIND_RSI_MAX:.0f}",
+        f"  displacement ≥{cfg.MOMENTUM_GRIND_MIN_DISPLACEMENT:.1f}% vs 20min ago  |  vol &gt;{cfg.MOMENTUM_GRIND_VOL_MIN_FLOOR:.2f}× MA10  |  ≥{cfg.MOMENTUM_GRIND_ATH_DIST_MIN:.0f}% below 90d high",
+        f"  CD: {cfg.MOMENTUM_GRIND_COOLDOWN_MIN // 60}H",
         f"  SL {cfg.MOMENTUM_GRIND_SL_PCT:.0f}%  TP1 {cfg.MOMENTUM_GRIND_TP1_PCT:.0f}%  TP2 {cfg.MOMENTUM_GRIND_TP2_PCT:.0f}%",
     ])
 
@@ -2719,33 +2719,29 @@ def send_signal_alert(info: dict) -> tuple[bool, int | None]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_grind_watchlist_message(candidates: list) -> str:
-    """/grind — Current GRIND radar candidates."""
+    """/grind — Coins recently alerted by GRIND scanner (within 2H cooldown)."""
     if not candidates:
         return (
             "📈 <b>GRIND RADAR</b>\n\n"
-            "No coins in grind tracking.\n\n"
-            "<i>Coins appear here when 2+ consecutive 5m green candles above EMA20 are "
-            "detected with RSI 35–78 and vol ≥ 0.8× MA10.</i>"
+            "No recent GRIND alerts.\n\n"
+            "<i>Coins appear here after a GRIND alert fires (shown for 2H cooldown window).</i>"
         )
 
     lines = [
         "📈 <b>GRIND RADAR</b>",
-        f"  {len(candidates)} coin(s) tracked",
+        f"  {len(candidates)} coin(s) alerted recently",
         "",
     ]
     for c in candidates:
-        sym   = c["symbol"]
-        age   = c["age_min"]
-        s_px  = c["stage_a_price"]
-        cur   = c["current_price"]
-        rsi   = c["rsi_at_add"]
-        pct   = (cur - s_px) / s_px * 100.0 if s_px > 0 else 0.0
+        sym = c["symbol"]
+        age = c["age_min"]
+        cur = c["current_price"]
+        cur_str = f"${_fmt_price(cur)}" if cur > 0 else "N/A"
         lines += [
-            f"<b>{sym}</b>  —  {age:.0f} min ago  |  RSI {rsi:.0f} at Stage A",
-            f"  Stage A: ${_fmt_price(s_px)} → now ${_fmt_price(cur)}  ({pct:+.1f}%)",
+            f"<b>{sym}</b>  —  alerted {age:.0f} min ago  |  now {cur_str}",
             "",
         ]
-    lines.append("<i>4+ candles + quality checks → EARLY GRIND alert fires.</i>")
+    lines.append("<i>2H cooldown active — same coin won't re-alert within this window.</i>")
     return "\n".join(lines)
 
 
