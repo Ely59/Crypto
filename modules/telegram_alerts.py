@@ -2027,8 +2027,8 @@ def build_filters_message() -> str:
         "",
         "<b>GRIND 🔄</b>",
         f"  Stage A: ≥{cfg.MOMENTUM_GRIND_MIN_CONSEC_A} consec green 5m above EMA20  |  RSI {cfg.MOMENTUM_GRIND_RSI_MIN:.0f}–{cfg.MOMENTUM_GRIND_RSI_MAX:.0f}  |  vol ≥{cfg.MOMENTUM_GRIND_VOL_MIN_A:.1f}× MA10",
-        f"  Stage B: ≥{cfg.MOMENTUM_GRIND_MIN_CONSEC_B} candles  |  Vol/MC ≥{cfg.MOMENTUM_GRIND_VOLMC_MIN*100:.0f}%  |  ≥{cfg.MOMENTUM_GRIND_ATH_DIST_MIN:.0f}% below 90d high",
-        f"  Min Stage A age: {cfg.MOMENTUM_GRIND_MIN_STAGE_A_MINUTES}m  |  CD: {cfg.MOMENTUM_GRIND_COOLDOWN_MIN // 60}H",
+        f"  Stage B: ≥{cfg.MOMENTUM_GRIND_MIN_CONSEC_B} candles  |  EMA6 &gt; EMA20  |  avg vol ≥ MA10  |  ≥{cfg.MOMENTUM_GRIND_ATH_DIST_MIN:.0f}% below 90d high",
+        f"  Quality: 1/3 (vol building, RSI rising, KDJ &lt;{cfg.MOMENTUM_GRIND_KDJ_MAX:.0f})  |  min age: {cfg.MOMENTUM_GRIND_MIN_STAGE_A_MINUTES}m  |  CD: {cfg.MOMENTUM_GRIND_COOLDOWN_MIN // 60}H",
         f"  SL {cfg.MOMENTUM_GRIND_SL_PCT:.0f}%  TP1 {cfg.MOMENTUM_GRIND_TP1_PCT:.0f}%  TP2 {cfg.MOMENTUM_GRIND_TP2_PCT:.0f}%",
     ])
 
@@ -2761,7 +2761,8 @@ def build_grind_alert(grind, margin: float = 5.0, leverage: int = 5) -> str:
     profit1  = pos_size * (_cfg.MOMENTUM_GRIND_TP1_PCT / 100.0) * 0.59
     profit2  = pos_size * (_cfg.MOMENTUM_GRIND_TP2_PCT / 100.0) * 0.41
 
-    mcap_str = _vol_human(grind.market_cap) if grind.market_cap > 0 else "N/A"
+    mcap_str   = _vol_human(grind.market_cap) if grind.market_cap > 0 else "N/A"
+    vol_mc_str = f"{grind.vol_mc_pct:.0f}%" if grind.market_cap > 0 else "N/A"
 
     levels: list[tuple[float, str]] = [
         (grind.tp2,        f"── TP2  +{_cfg.MOMENTUM_GRIND_TP2_PCT:.0f}% → +${profit2:.2f} (runner)"),
@@ -2778,7 +2779,7 @@ def build_grind_alert(grind, margin: float = 5.0, leverage: int = 5) -> str:
         f"📈 <b>{grind.symbol}</b> — EARLY GRIND",
         _SEP,
         f"Current price: {fp(grind.price)}",
-        f"MCap {mcap_str} | 90d -{grind.ath_dist_pct:.0f}% | Vol/MC {grind.vol_mc_pct:.0f}%",
+        f"MCap {mcap_str} | 90d -{grind.ath_dist_pct:.0f}% | Vol/MC {vol_mc_str}",
         f"Grind running: ~{grind.grind_age_min:.0f} min | Started ~{fp(grind.stage_a_price)}",
         f"RSI: {grind.rsi_at_stage_a:.0f} → {grind.rsi_now:.0f} ↑",
         f"5m ✅  15m ⬜  1H ⬜  4H ⬜ (info)",

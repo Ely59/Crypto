@@ -3712,25 +3712,41 @@ def scan_grind() -> "list[GrindResult]":
     """
     GRIND scanner — runs every 5 min, completely independent of the main pipeline.
 
-    Stage A (silent): ≥2 consecutive green 5m candles above EMA20, RSI6 35-78, vol ≥ 0.8×MA10.
+    Stage A (silent): ≥2 consecutive green 5m candles above EMA20, RSI6 35-65, vol ≥ 0.8×MA10.
       → Coin added to _grind_candidates with TTL 60 min.
 
-    Stage B (alert): ≥4 candles + Vol/MC > 25% + ≥10% below 90d high + ≥2/5 quality checks.
+    Stage B (alert): ≥4 candles + EMA6>EMA20 + avg vol ≥ MA10 + ≥10% below 90d high + 1/3 quality.
       → Returns GrindResult for each coin ready to alert.
 
     EXPLOSION override: if ≥2 of the grind candles have body > 4%, the coin is deferred
     to the main scanner (which handles explosive moves) and removed from candidates.
+
+    CMC fallback: when _cmc_data_cache is empty, iterates MEXC futures symbols directly;
+    price is taken from the latest 5m close; name/mcap/circ display as N/A in alert.
     """
     global _grind_candidates, _grind_alerted
 
     now = time.time()
     results: list[GrindResult] = []
 
-    if not _cmc_data_cache:
-        log.debug("GRIND: CMC cache empty — skipping")
+    mexc_syms = get_mexc_futures_symbols()
+    if not mexc_syms:
         return results
 
-    mexc_syms = get_mexc_futures_symbols()
+    # ── Build coin universe ───────────────────────────────────────────────────
+    # Prefer CMC cache (provides name/mcap for display); fall back to MEXC symbols.
+    if _cmc_data_cache:
+        coin_universe = [
+            (sym, name, mcap, vol_24h, fdv_ratio, circ_pct, _cmc_price_cache.get(sym, 0.0))
+            for sym, (name, _tags, mcap, vol_24h, _fdv, fdv_ratio, circ_pct)
+            in _cmc_data_cache.items()
+        ]
+    else:
+        log.debug("GRIND: CMC cache empty — MEXC-only fallback mode")
+        coin_universe = [
+            (sym.replace("_USDT", ""), "", 0.0, 0.0, 0.0, 0.0, 0.0)
+            for sym in mexc_syms if sym.endswith("_USDT")
+        ]
 
     # Expire stale Stage A candidates (TTL)
     ttl_sec = cfg.MOMENTUM_GRIND_TTL_MIN * 60
@@ -3739,17 +3755,12 @@ def scan_grind() -> "list[GrindResult]":
         del _grind_candidates[sym]
         log.debug(f"GRIND: {sym} expired (TTL {cfg.MOMENTUM_GRIND_TTL_MIN}m)")
 
-    for symbol, cmc_entry in list(_cmc_data_cache.items()):
-        name, matched_tags, mcap, vol_24h, fdv, fdv_ratio, circ_pct = cmc_entry
+    for symbol, name, mcap, vol_24h, fdv_ratio, circ_pct, cmc_price in coin_universe:
         mexc_symbol = f"{symbol}_USDT"
 
         if mexc_symbol not in mexc_syms:
             continue
         if _on_grind_cooldown(symbol):
-            continue
-
-        price = _cmc_price_cache.get(symbol, 0.0)
-        if price <= 0:
             continue
 
         # Fetch 5m klines (primary data source for GRIND)
@@ -3761,6 +3772,11 @@ def scan_grind() -> "list[GrindResult]":
         closes = df5m["close"].astype(float)
         opens  = df5m["open"].astype(float)
         vols   = df5m["volume"].astype(float)
+
+        # Price: prefer CMC snapshot; fall back to latest 5m close
+        price = cmc_price if cmc_price > 0 else float(closes.iloc[-1])
+        if price <= 0:
+            continue
 
         ema20_s   = compute_ema(closes, 20)
         ema6_s    = compute_ema(closes,  6)
@@ -3795,7 +3811,7 @@ def scan_grind() -> "list[GrindResult]":
             log.debug(f"GRIND {symbol}: EXPLOSION ({explosion_count} explosive candles) — deferred")
             continue
 
-        # Stage A gate
+        # ── Stage A gate ──────────────────────────────────────────────────────
         rsi_ok   = cfg.MOMENTUM_GRIND_RSI_MIN <= m5_rsi6 <= cfg.MOMENTUM_GRIND_RSI_MAX
         vol_ok_a = vol_ma10 > 0 and vol_last >= cfg.MOMENTUM_GRIND_VOL_MIN_A * vol_ma10
         if not (consec >= cfg.MOMENTUM_GRIND_MIN_CONSEC_A and rsi_ok and vol_ok_a):
@@ -3818,7 +3834,7 @@ def scan_grind() -> "list[GrindResult]":
             log.debug(f"GRIND Stage A: {symbol} ({consec} green candles, RSI {m5_rsi6:.1f})")
 
         # ── Stage B mandatory checks ──────────────────────────────────────────
-        # Enforce minimum observation period before Stage B can fire
+        # Minimum observation period
         _cand_age_min = (now - _grind_candidates[symbol]["added_ts"]) / 60.0
         if _cand_age_min < cfg.MOMENTUM_GRIND_MIN_STAGE_A_MINUTES:
             log.debug(f"GRIND {symbol}: age {_cand_age_min:.0f}m < {cfg.MOMENTUM_GRIND_MIN_STAGE_A_MINUTES}m minimum — waiting")
@@ -3827,8 +3843,13 @@ def scan_grind() -> "list[GrindResult]":
         if consec < cfg.MOMENTUM_GRIND_MIN_CONSEC_B:
             continue
 
-        vol_mc = vol_24h / mcap if mcap > 0 else 0.0
-        if vol_mc < cfg.MOMENTUM_GRIND_VOLMC_MIN:
+        # EMA6 must be above EMA20: uptrend structure required
+        if not (m5_ema6 > m5_ema20):
+            continue
+
+        # Sustained buying: avg vol of last 4 candles must be at or above 10-candle MA
+        avg_vol_last4 = float(vols.iloc[-5:-1].mean()) if len(vols) >= 5 else vol_last
+        if not (vol_ma10 > 0 and avg_vol_last4 >= vol_ma10):
             continue
 
         h90d = _get_90d_high(mexc_symbol)
@@ -3838,21 +3859,17 @@ def scan_grind() -> "list[GrindResult]":
         if ath_dist < cfg.MOMENTUM_GRIND_ATH_DIST_MIN:
             continue
 
-        # ── Quality checks (≥ 2 of 5 must pass) ─────────────────────────────
-        avg_vol_last4 = float(vols.iloc[-5:-1].mean()) if len(vols) >= 5 else vol_last
-        vol_first2    = (float(vols.iloc[-consec:-consec+2].mean())
-                         if consec >= 4 and len(vols) > consec
-                         else float(vols.iloc[-consec:].mean()))
-        vol_last2     = float(vols.iloc[-2:].mean()) if len(vols) >= 2 else vol_last
-        rsi_4ago      = float(rsi_s.iloc[-5]) if len(rsi_s) >= 5 else (m5_rsi6 - 1.0)
+        # ── Quality checks (≥ 1 of 3 must pass) ─────────────────────────────
+        vol_first2 = (float(vols.iloc[-consec:-consec+2].mean())
+                      if consec >= 4 and len(vols) > consec
+                      else float(vols.iloc[-consec:].mean()))
+        rsi_4ago   = float(rsi_s.iloc[-5]) if len(rsi_s) >= 5 else (m5_rsi6 - 1.0)
 
-        q1 = m5_ema6 > m5_ema20                               # EMA6 > EMA20
-        q2 = vol_ma10 > 0 and avg_vol_last4 >= vol_ma10       # avg vol last 4 candles ≥ MA10
         q3 = vol_last > vol_first2 if vol_first2 > 0 else False  # vol building
-        q4 = m5_rsi6 > rsi_4ago                               # RSI rising vs 4 candles ago
-        q5 = m5_kdj_j < 85                                    # KDJ J < 85
+        q4 = m5_rsi6 > rsi_4ago                                   # RSI rising vs 4 candles ago
+        q5 = m5_kdj_j < cfg.MOMENTUM_GRIND_KDJ_MAX               # KDJ J not overheated
 
-        quality_count = sum([q1, q2, q3, q4, q5])
+        quality_count = sum([q3, q4, q5])
         if quality_count < cfg.MOMENTUM_GRIND_QUALITY_MIN:
             continue
 
@@ -3863,6 +3880,7 @@ def scan_grind() -> "list[GrindResult]":
         sl  = round(entry * (1 - cfg.MOMENTUM_GRIND_SL_PCT  / 100.0), 8)
         tp1 = round(entry * (1 + cfg.MOMENTUM_GRIND_TP1_PCT / 100.0), 8)
         tp2 = round(entry * (1 + cfg.MOMENTUM_GRIND_TP2_PCT / 100.0), 8)
+        vol_mc = vol_24h / mcap if mcap > 0 else 0.0
 
         result = GrindResult(
             symbol          = symbol,
@@ -3886,7 +3904,7 @@ def scan_grind() -> "list[GrindResult]":
             rsi_now         = round(m5_rsi6, 1),
             consec_candles  = consec,
             quality_count   = quality_count,
-            quality_flags   = {"q1": q1, "q2": q2, "q3": q3, "q4": q4, "q5": q5},
+            quality_flags   = {"q3": q3, "q4": q4, "q5": q5},
         )
         results.append(result)
 
@@ -3895,8 +3913,8 @@ def scan_grind() -> "list[GrindResult]":
         del _grind_candidates[symbol]
         log.info(
             f"GRIND Stage B: {symbol} — {consec} candles, RSI {m5_rsi6:.1f}, "
-            f"quality {quality_count}/5, 90d dist {ath_dist:.1f}%, "
-            f"Vol/MC {vol_mc*100:.0f}%"
+            f"quality {quality_count}/3, 90d dist {ath_dist:.1f}%, "
+            f"EMA6 {m5_ema6:.6f} > EMA20 {m5_ema20:.6f}"
         )
 
     return results
