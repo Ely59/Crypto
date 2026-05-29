@@ -504,91 +504,94 @@ def run_backtesting(date_str: str) -> dict:
     entries: list[dict] = []
 
     for row in alerts:
-        symbol   = row.get("coin", "").strip()
-        sig_type = row.get("signal_type", "")
-        pat_type = row.get("pattern_type", "")
+        symbol = row.get("coin", "").strip()
         try:
-            leg_num = int(row.get("leg_number") or 1)
-        except (ValueError, TypeError):
-            leg_num = 1
-        try:
-            score = int(row.get("score") or 0)
-        except (ValueError, TypeError):
-            score = 0
-        try:
-            entry_price = float(row.get("price_at_alert") or 0)
-        except (ValueError, TypeError):
-            continue
-        if entry_price <= 0 or not symbol:
-            continue
+            sig_type = row.get("signal_type", "")
+            pat_type = row.get("pattern_type", "")
+            try:
+                leg_num = int(row.get("leg_number") or 1)
+            except (ValueError, TypeError):
+                leg_num = 1
+            try:
+                score = int(row.get("score") or 0)
+            except (ValueError, TypeError):
+                score = 0
+            try:
+                entry_price = float(row.get("price_at_alert") or 0)
+            except (ValueError, TypeError):
+                continue
+            if entry_price <= 0 or not symbol:
+                continue
 
-        try:
-            alert_berlin = datetime.strptime(
-                row["timestamp"], "%Y-%m-%d %H:%M"
-            ).replace(tzinfo=_BERLIN)
-        except ValueError:
-            continue
+            try:
+                alert_berlin = datetime.strptime(
+                    row["timestamp"], "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=_BERLIN)
+            except ValueError:
+                continue
 
-        alert_utc  = alert_berlin.astimezone(timezone.utc)
-        time_str   = alert_berlin.strftime("%H:%M")
-        start_unix = int(alert_utc.timestamp())
-        mexc_sym   = f"{symbol}_USDT"
+            alert_utc  = alert_berlin.astimezone(timezone.utc)
+            time_str   = alert_berlin.strftime("%H:%M")
+            start_unix = int(alert_utc.timestamp())
+            mexc_sym   = f"{symbol}_USDT"
 
-        df = get_mexc_futures_klines(
-            mexc_sym, "1h", limit=30,
-            start_time=start_unix,
-            min_candles=1,
-        )
-        _time.sleep(0.25)
+            df = get_mexc_futures_klines(
+                mexc_sym, "1h", limit=30,
+                start_time=start_unix,
+                min_candles=1,
+            )
+            _time.sleep(0.25)
 
-        def _price_at(offset_h: int) -> float | None:
-            target_utc = alert_utc + timedelta(hours=offset_h)
-            if now_utc < target_utc:
-                return None
-            if df is None or df.empty:
-                return None
-            target_pd = pd.Timestamp(target_utc)
-            pos = df.index.searchsorted(target_pd)
-            pos = min(pos, len(df) - 1)
-            return float(df["close"].iloc[pos])
+            def _price_at(offset_h: int) -> float | None:
+                target_utc = alert_utc + timedelta(hours=offset_h)
+                if now_utc < target_utc:
+                    return None
+                if df is None or df.empty:
+                    return None
+                target_pd = pd.Timestamp(target_utc)
+                pos = df.index.searchsorted(target_pd)
+                pos = min(pos, len(df) - 1)
+                return float(df["close"].iloc[pos])
 
-        def _pct(price: float | None) -> float | None:
-            if price is None or entry_price <= 0:
-                return None
-            return (price - entry_price) / entry_price * 100.0
+            def _pct(price: float | None) -> float | None:
+                if price is None or entry_price <= 0:
+                    return None
+                return (price - entry_price) / entry_price * 100.0
 
-        p1h  = _price_at(1)
-        p4h  = _price_at(4)
-        p24h = _price_at(24)
-        pct1  = _pct(p1h)
-        pct4  = _pct(p4h)
-        pct24 = _pct(p24h)
+            p1h  = _price_at(1)
+            p4h  = _price_at(4)
+            p24h = _price_at(24)
+            pct1  = _pct(p1h)
+            pct4  = _pct(p4h)
+            pct24 = _pct(p24h)
 
-        dip_pct = 0.0
-        if df is not None and not df.empty:
-            alert_pd = pd.Timestamp(alert_utc)
-            end_pd   = pd.Timestamp(alert_utc + timedelta(hours=24))
-            w24 = df[(df.index >= alert_pd) & (df.index <= end_pd)]
-            if not w24.empty:
-                min_low = float(w24["low"].min())
-                dip_pct = max(0.0, (entry_price - min_low) / entry_price * 100.0)
+            dip_pct = 0.0
+            if df is not None and not df.empty:
+                alert_pd = pd.Timestamp(alert_utc)
+                end_pd   = pd.Timestamp(alert_utc + timedelta(hours=24))
+                w24 = df[(df.index >= alert_pd) & (df.index <= end_pd)]
+                if not w24.empty:
+                    min_low = float(w24["low"].min())
+                    dip_pct = max(0.0, (entry_price - min_low) / entry_price * 100.0)
 
-        tp1_pct = 6.0 if pat_type == "GRIND" else 5.0
-        verdict = _classify_verdict(pct1, pct4, pct24, dip_pct, tp1_pct=tp1_pct)
+            tp1_pct = 6.0 if pat_type == "GRIND" else 5.0
+            verdict = _classify_verdict(pct1, pct4, pct24, dip_pct, tp1_pct=tp1_pct)
 
-        entries.append({
-            "symbol":   symbol,
-            "time_str": time_str,
-            "sig_type": sig_type,
-            "pat_type": pat_type,
-            "leg_num":  leg_num,
-            "score":    score,
-            "entry":    entry_price,
-            "pct_1h":   round(pct1,  2) if pct1  is not None else None,
-            "pct_4h":   round(pct4,  2) if pct4  is not None else None,
-            "pct_24h":  round(pct24, 2) if pct24 is not None else None,
-            "dip_pct":  round(dip_pct, 2),
-            "verdict":  verdict,
-        })
+            entries.append({
+                "symbol":   symbol,
+                "time_str": time_str,
+                "sig_type": sig_type,
+                "pat_type": pat_type,
+                "leg_num":  leg_num,
+                "score":    score,
+                "entry":    entry_price,
+                "pct_1h":   round(pct1,  2) if pct1  is not None else None,
+                "pct_4h":   round(pct4,  2) if pct4  is not None else None,
+                "pct_24h":  round(pct24, 2) if pct24 is not None else None,
+                "dip_pct":  round(dip_pct, 2),
+                "verdict":  verdict,
+            })
+        except Exception as exc:
+            log.warning(f"backtesting: skipping {symbol} — {exc}")
 
     return {"date": date_str, "entries": entries, "has_data": True, "error": None}

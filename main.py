@@ -747,7 +747,8 @@ async def _command_poll_async() -> None:
                         _reply(chat_id, "Usage: /backtesting YYYY-MM-DD\nExample: /backtesting 2026-05-26")
                     else:
                         _reply(chat_id, "⏳ Fetching klines… this takes ~10–30s.")
-                        bt_result = m_log.run_backtesting(date_arg)
+                        loop      = asyncio.get_event_loop()
+                        bt_result = await loop.run_in_executor(None, m_log.run_backtesting, date_arg)
                         _reply(chat_id, m4.build_backtesting_message(bt_result))
                     log.info(f"/backtesting {date_arg} replied.")
                 elif text.startswith("/summary"):
