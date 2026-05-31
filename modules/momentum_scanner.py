@@ -3721,25 +3721,38 @@ def scan_grind() -> "list[GrindResult]":
     if not mexc_syms:
         return results
 
-    if _cmc_data_cache:
+    cmc_available = bool(_cmc_data_cache)
+    if cmc_available:
         coin_universe = [
-            (sym, name, mcap, vol_24h, fdv_ratio, circ_pct, _cmc_price_cache.get(sym, 0.0))
-            for sym, (name, _tags, mcap, vol_24h, _fdv, fdv_ratio, circ_pct)
+            (sym, name, tags, mcap, vol_24h, fdv_ratio, circ_pct, _cmc_price_cache.get(sym, 0.0))
+            for sym, (name, tags, mcap, vol_24h, _fdv, fdv_ratio, circ_pct)
             in _cmc_data_cache.items()
         ]
     else:
         log.debug("GRIND: CMC cache empty — MEXC-only fallback mode")
         coin_universe = [
-            (sym.replace("_USDT", ""), "", 0.0, 0.0, 0.0, 0.0, 0.0)
+            (sym.replace("_USDT", ""), "", None, 0.0, 0.0, 0.0, 0.0, 0.0)
             for sym in mexc_syms if sym.endswith("_USDT")
         ]
 
-    for symbol, name, mcap, vol_24h, fdv_ratio, circ_pct, cmc_price in coin_universe:
+    for symbol, name, tags, mcap, vol_24h, fdv_ratio, circ_pct, cmc_price in coin_universe:
         mexc_symbol = f"{symbol}_USDT"
         if mexc_symbol not in mexc_syms:
             continue
         if _on_grind_cooldown(symbol):
             continue
+
+        # ── Fundamental pre-filters (CMC data required; skipped in fallback mode) ──
+        if cmc_available:
+            if not (cfg.MOMENTUM_GRIND_MCAP_MIN <= mcap <= cfg.MOMENTUM_GRIND_MCAP_MAX):
+                continue
+            if circ_pct < cfg.MOMENTUM_GRIND_CIRC_MIN:
+                continue
+            if fdv_ratio > cfg.MOMENTUM_GRIND_FDV_MAX:
+                continue
+            if tags:  # non-empty tag list: must match at least one allowed category
+                if not any(t in cfg.MOMENTUM_ALLOWED_TAGS for t in tags):
+                    continue
 
         df5m = get_mexc_futures_klines(mexc_symbol, "5m", limit=cfg.MOMENTUM_TA_5M_LIMIT)
         time.sleep(0.1)
@@ -3794,12 +3807,12 @@ def scan_grind() -> "list[GrindResult]":
         if m5_rsi6 >= cfg.MOMENTUM_GRIND_RSI_MAX:
             continue
 
-        # Condition 5: ATH distance ≥ 10% below 90d high
+        # Condition 5: ATH distance 10%–80% below 90d high
         h90d = _get_90d_high(mexc_symbol)
         if h90d <= 0 or price <= 0:
             continue
         ath_dist = (h90d - price) / h90d * 100.0
-        if ath_dist < cfg.MOMENTUM_GRIND_ATH_DIST_MIN:
+        if ath_dist < cfg.MOMENTUM_GRIND_ATH_DIST_MIN or ath_dist > cfg.MOMENTUM_GRIND_ATH_DIST_MAX:
             continue
 
         # Condition 6: volume floor — avg last 4 candles > 0.20× MA10

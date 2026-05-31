@@ -439,6 +439,11 @@ MOMENTUM_GRIND_COOLDOWN_MIN      = 120    # 2H per-coin cooldown after alert
 MOMENTUM_GRIND_SL_PCT            = 4.0
 MOMENTUM_GRIND_TP1_PCT           = 6.0
 MOMENTUM_GRIND_TP2_PCT           = 12.0
+MOMENTUM_GRIND_MCAP_MIN          = 25_000_000    # $25M floor
+MOMENTUM_GRIND_MCAP_MAX          = 5_000_000_000 # $5B ceiling
+MOMENTUM_GRIND_CIRC_MIN          = 0.30          # ≥ 30% circulating supply
+MOMENTUM_GRIND_FDV_MAX           = 3.0           # FDV/MCap ratio ≤ 3×
+MOMENTUM_GRIND_ATH_DIST_MAX      = 80.0          # ≤ 80% below 90d high (structurally broken)
 
 # ─── MEXC Trading API (authenticated) ────────────────────────────────────────
 MEXC_API_KEY    = os.getenv("MEXC_API_KEY", "").strip()
