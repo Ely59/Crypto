@@ -344,8 +344,9 @@ def run_grind_scanner():
     """
     GRIND scanner — every 5 minutes.
     Independent of the main pipeline; detects slow-grind 5m momentum builds.
-    Stage A: silent tracking (added to _grind_candidates).
-    Stage B: EARLY GRIND alert when 4+ consecutive green candles + quality checks pass.
+    Fires immediately when 6 stateless conditions pass on 5m candles.
+    Each GRIND alert elevates the coin to Tier 2 priority scanning for 30 min
+    so the main pipeline can confirm with a STRONG ENTRY once 15m TA aligns.
     """
     log.debug("GRIND scan: starting…")
     try:
@@ -363,6 +364,7 @@ def run_grind_scanner():
     for grind in results:
         m4.send_grind_alert(grind, mg, lv)
         m_log.log_alert(grind, grind.recommendation)
+        m5.add_grind_elevated(grind.mexc_symbol)
 
     log.info(f"GRIND scan: {len(results)} alert(s) sent.")
 

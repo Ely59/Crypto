@@ -566,9 +566,18 @@ def _mark_grind_alerted(symbol: str) -> None:
         del _grind_alerted[k]
 
 
+def add_grind_elevated(mexc_symbol: str) -> None:
+    """Elevate a GRIND-alerted coin to 5-min Tier 2 scanning for the next 30 minutes.
+    Called by main.py immediately after each GRIND alert is sent."""
+    _grind_elevated[mexc_symbol] = time.time()
+    log.info(f"GRIND elevated: {mexc_symbol} added to Tier 2 priority watchlist (30-min window)")
+
+
 # ── Tiered scan state — MASTER PROMPT Part A ─────────────────────────────────
 # Tier 2: coins with active 5m momentum (populated during Tier 1 scan)
 _active_watch: set[str] = set()           # mexc_symbols with 5m EMA cross / spike
+# Tier 2 Part C: coins elevated to 5-min scanning after a GRIND alert fires
+_grind_elevated: dict[str, float] = {}    # mexc_symbol → timestamp when elevated; 30-min TTL
 # Tier 3: coins that received an alert (for leg continuation tracking)
 _alert_watchlist: dict[str, dict] = {}    # symbol → {leg_high, entry_price, signal_type, leg_number, alert_time}
 
@@ -3295,13 +3304,22 @@ def scan_tier2() -> list:
     global _tier2_last_run
     _tier2_last_run = time.time()
 
-    if not _active_watch and not _stage0_watchlist:
-        log.debug("Tier 2: active_watch and stage0_watchlist both empty — skipping.")
+    # Expire GRIND-elevated entries older than 30 minutes
+    _grind_ttl = 30 * 60
+    _grind_expired = [sym for sym, ts in list(_grind_elevated.items())
+                      if time.time() - ts > _grind_ttl]
+    for sym in _grind_expired:
+        del _grind_elevated[sym]
+        log.debug(f"GRIND elevated: {sym} expired from Tier 2 priority watchlist")
+
+    if not _active_watch and not _stage0_watchlist and not _grind_elevated:
+        log.debug("Tier 2: active_watch, stage0_watchlist, and grind_elevated all empty — skipping.")
         return []
 
     log.info(
         f"Tier 2 scan: {len(_active_watch)} in active_watch, "
-        f"{len(_stage0_watchlist)} in stage0_watchlist."
+        f"{len(_stage0_watchlist)} in stage0_watchlist, "
+        f"{len(_grind_elevated)} in grind_elevated."
     )
     _refresh_market_context()
     _ath_map    = get_coingecko_ath_map(limit=500)
@@ -3490,6 +3508,100 @@ def scan_tier2() -> list:
             sl_pct=cfg.MOMENTUM_SL_PCT,
             ath_dist_pct=_ath_dist, ath_price=_ath_px, ath_date=_ath_date,
             stage0_breakout=True,
+            pattern_type=_pat_type,
+            pattern_bonus=_pat_bonus,
+        ))
+
+    # ── Part C: GRIND-elevated coins — 5-min rescan after a GRIND alert ─────────
+    # Coins arrive here because scan_grind() fired on them. We now check every
+    # 5 min whether their 15m TA has confirmed into a full STRONG ENTRY signal.
+    # Same scoring formula as Part A; no score relaxation — quality bar unchanged.
+    for mexc_symbol, elevated_ts in list(_grind_elevated.items()):
+        symbol = mexc_symbol.replace("_USDT", "")
+        if symbol in alerted_this_t2:
+            continue
+        if _on_global_cooldown(symbol, "TIER2", 0.0):
+            continue
+        if mexc_symbol not in futures_set:
+            continue
+
+        m5 = _check_5m(mexc_symbol)
+        if not _base_5m_gate_ok(m5):
+            continue
+
+        tech = _check_technicals(mexc_symbol)
+        if tech is None:
+            continue
+
+        price = tech.m15_price
+        if price <= 0:
+            continue
+
+        _apply_5m_to_tech(tech, m5)
+
+        cached = _cmc_data_cache.get(symbol)
+        if cached:
+            t2_name, t2_tags, t2_mcap, t2_vol, t2_fdv, t2_fdr, t2_circ = cached
+        else:
+            t2_name, t2_tags, t2_mcap, t2_vol, t2_fdv, t2_fdr, t2_circ = (
+                symbol, [], 0.0, 0.0, 0.0, 0.0, 0.0
+            )
+
+        fund    = _score_fundamentals(0.0, t2_mcap, t2_circ, t2_fdr)
+        _ath_dist, _ath_px, _ath_date = _lookup_local_high(mexc_symbol, price, tech.ath_dist_pct)
+        ath_pts = _ath_score(_ath_dist)
+
+        # GRIND pattern is confirmed by definition — apply its bonus directly
+        _pat_type  = "GRIND"
+        _pat_bonus = cfg.MOMENTUM_PAT_GRIND_BONUS
+
+        gc_score = tech.score + fund.total + ath_pts + tech.h4_score + tech.h1_score + _pat_bonus
+        gc_score = max(0, min(100, gc_score))
+
+        elapsed_min = (_t2_now - elevated_ts) / 60.0
+
+        if gc_score < cfg.MOMENTUM_TOTAL_WATCH:
+            log.debug(
+                f"  GRIND-elev skip {symbol}: score {gc_score} < {cfg.MOMENTUM_TOTAL_WATCH} "
+                f"({elapsed_min:.0f}m since GRIND)  4H {tech.h4_status}"
+            )
+            continue
+
+        decimals = _price_decimals(price)
+        if gc_score >= cfg.MOMENTUM_TOTAL_STRONG_ENTRY:
+            gc_rec, gc_emoji = "STRONG ENTRY", "🟢"
+        else:
+            gc_rec, gc_emoji = "WATCH", "🟡"
+
+        log.info(
+            f"  GRIND-elev ✓  {symbol}  score {gc_score}  → {gc_rec}  "
+            f"{elapsed_min:.0f}m after GRIND alert  4H {tech.h4_status}"
+        )
+        _mark_alerted(symbol)
+        _mark_global_alerted(symbol, gc_rec, price)
+        _add_to_watchlist(symbol, price, gc_rec)
+        alerted_this_t2.add(symbol)
+        # Remove from elevated watchlist — it has been promoted to a full alert
+        _grind_elevated.pop(mexc_symbol, None)
+
+        results.append(MomentumResult(
+            symbol=symbol, name=t2_name, price=round(price, 8),
+            change_1h=0.0, change_24h=0.0,
+            market_cap=t2_mcap, volume_24h=t2_vol, fdv=t2_fdv,
+            fdv_mcap_ratio=round(t2_fdr, 2), circ_supply_pct=round(t2_circ, 1),
+            matched_tags=t2_tags,
+            mexc_symbol=mexc_symbol,
+            tech=tech, fund=fund, total_score=gc_score,
+            recommendation=gc_rec, rec_emoji=gc_emoji,
+            warnings=[f"GRIND-confirmed signal — 15m TA aligned {elapsed_min:.0f}m after GRIND alert"],
+            ath_pts=ath_pts,
+            entry_price=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET), decimals),
+            stop_loss=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 - cfg.MOMENTUM_SL_PCT / 100), decimals),
+            tp1=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP1_PCT / 100), decimals),
+            tp2=round(price * (1 + cfg.MOMENTUM_ENTRY_LIMIT_OFFSET) * (1 + cfg.MOMENTUM_TP2_PCT / 100), decimals),
+            sl_pct=cfg.MOMENTUM_SL_PCT,
+            ath_dist_pct=_ath_dist, ath_price=_ath_px, ath_date=_ath_date,
+            stage0_breakout=False,
             pattern_type=_pat_type,
             pattern_bonus=_pat_bonus,
         ))
